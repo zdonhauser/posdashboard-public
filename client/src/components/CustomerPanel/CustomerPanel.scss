@@ -1,0 +1,238 @@
+  
+  /* Styles for the customer edit modal */
+  .editCustomer {
+    background-color: white;
+    padding: 10px;
+    width: 40%;
+    border: 5px solid black;
+    border-radius: 5px;
+    font-size: min(max(2vw, 16px), 24px);
+    box-sizing: border-box;
+  
+    @media (max-width: 600px) {
+      width: 100%;
+      padding: 20vh 0;
+      margin: 0;
+      height: 95vh;
+      border: none;
+      left: 0;
+      top: 0;
+    }
+  
+    input {
+      width: 50%;
+      padding: 0;
+      margin-bottom: 3vh;
+      background: none;
+      border: none;
+      border-bottom: 2px solid #333;
+      outline: none;
+      transition: border-color 0.3s;
+    }
+  }
+  
+  /* Styles for the suggestions modal */
+  .suggestions-modal {
+    background-color: white;
+    width: 40%;
+    border: 1px solid #888;
+    border-radius: 5px;
+    padding: 10px;
+    box-sizing: border-box;
+  
+    @media (max-width: 600px) {
+      width: 100%;
+      padding: 10px;
+    }
+  }
+  
+  .suggestions-modal-content {
+    padding: 20px;
+  }
+  
+  .suggestions-modal-content ul {
+    list-style-type: none;
+    padding: 0;
+  }
+  
+  .suggestions-modal-content li {
+    padding: 10px;
+    cursor: pointer;
+    border-bottom: 1px solid #ddd;
+    margin-bottom: 10px;
+  }
+  
+  .suggestions-modal-content li:last-child {
+    border-bottom: none;
+  }
+  
+  .suggestions-modal-content li:hover {
+    background-color: #f9f9f9;
+  }
+  
+  .close-button {
+    color: #aaa;
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+  }
+  
+  .close-button:hover,
+  .close-button:focus {
+    color: black;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  
+  .suggestions-modal-content div {
+    margin-bottom: 5px;
+  }
+  
+  /* Other existing styles */
+  .customerGridWrapper {
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: 100%;
+    gap: 1vh;
+    padding: 1vh;
+    box-sizing: border-box;
+  }
+
+  .addCustomerButton {
+    text-align: center;
+    background-color: white;
+    color: black;
+    width: clamp(100px, 50%, 300px);
+    height: clamp(5px, 4vh, 50px);
+    padding: 0;
+    margin: 0 auto;
+    font-size: clamp(5px, 1.5vh, 18px);
+    border-radius: 5px;
+    border: 1px solid black !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background-color: blue;
+      border-color: white;
+      color: white;
+    }
+  }
+
+  .storeCreditInfo {
+    text-align: center;
+    font-size: clamp(12px, 1.5vh, 18px);
+  }
+
+  #addDiscountButton {
+    text-align: center;
+    background-color: white;
+    color: black;
+    width: clamp(100px, 50%, 300px);
+    height: clamp(30px, 5vh, 50px);
+    margin: 0 auto;
+    font-size: clamp(12px, 1.5vh, 18px);
+    border-radius: 5px;
+    border: 1px solid black !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background-color: blue;
+      border-color: white;
+      color: white;
+    }
+  }
+
+  .customerGrid {
+    display: grid;
+    grid-template-columns: 3fr 1fr;
+    grid-auto-rows: min-content;
+    gap: 0.5vh;
+    overflow-y: auto;
+    align-content: start;
+    padding-right: 1vw;
+    height: 100%;
+  }
+
+  .listCustomer {
+    text-align: left;
+    font-size: clamp(12px, 1.5vh, 18px);
+    margin: 0;
+    padding: 0.5vh 0;
+  }
+
+  .listCustomDetail {
+    text-align: right;
+    font-size: clamp(12px, 1.5vh, 18px);
+    margin: 0;
+    padding: 0.5vh 0;
+  }
+
+  .clearCustomer {
+    text-align: center;
+  }
+
+  .customerDetail {
+    font-size: clamp(10px, 1.2vh, 16px);
+    opacity: 0.7;
+  }
+
+  .customerWrapper {
+    text-align: right;
+    padding-right: 2vw;
+    height: 100%;
+    overflow: auto;
+
+    .customerDetail {
+      text-align: center;
+    }
+  }
+
+   /* Styles for the employee results modal */
+   .employeeResults {
+    background-color: white;
+    width: 40%;
+    border: 5px solid black;
+    border-radius: 5px;
+    padding: 10px;
+    box-sizing: border-box;
+    font-size: min(max(2vw, 16px), 24px);
+    text-align: center;
+    input {
+      width: 50%;
+      padding: 0;
+      margin-bottom: 3vh;
+      background: none;
+      border: none;
+      border-bottom: 2px solid #333;
+      outline: none;
+      transition: border-color 0.3s;
+      font-size: min(max(2vw, 16px), 24px);
+      text-align: center;
+    }
+  }
+  
+  .employeeResults ul {
+    list-style-type: none;
+    padding: 0;
+  }
+  
+  .employeeResults li {
+    padding: 10px;
+    cursor: pointer;
+    border-bottom: 1px solid #ddd;
+    margin-bottom: 10px;
+  }
+  
+  .employeeResults li:last-child {
+    border-bottom: none;
+  }
+  
+  .employeeResults li:hover {
+    background-color: #f9f9f9;
+  }
+  

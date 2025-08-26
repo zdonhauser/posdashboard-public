@@ -1,0 +1,27 @@
+{
+    "parser": "@typescript-eslint/parser",
+    "extends": [
+      "eslint:recommended",
+      "plugin:@typescript-eslint/recommended"
+    ],
+    "plugins": [
+      "@typescript-eslint"
+    ],
+    "env": {
+      "browser": true,
+      "node": true
+    },
+    "rules": {
+      // Add your custom rules here
+      "no-mixed-spaces-and-tabs": "off",
+      "no-unused-vars": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "prefer-const": "off"
+    },
+    "ignorePatterns": [
+      "**/node_modules/",
+      "**/build/", // Add the build directory to the ignore list
+      "*.min.js"
+    ]
+  }
+  

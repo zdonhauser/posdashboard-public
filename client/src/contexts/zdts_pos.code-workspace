@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../../../.."
+		},
+		{
+			"path": "../../../../../zdt-jungle"
+		},
+		{
+			"path": "../../../../../Portfolio"
+		},
+		{
+			"path": "../../../../../kds-app"
+		},
+		{
+			"path": "../../../../../electronpos-public"
+		}
+	],
+	"settings": {}
+}

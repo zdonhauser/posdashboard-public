@@ -1,0 +1,70 @@
+.loginwindow{
+    background-color:whitesmoke;
+    position: fixed;
+    width:95vw;
+    height: 95vh;
+    left: 2.5vw;
+    top: 2.5vh;
+    box-sizing: border-box;
+    display:grid;
+
+    cursor:pointer;
+    user-select: none;
+    box-shadow: 0px 0px 5px black;
+    @media (orientation: landscape) {
+        grid-template-columns: 1fr 80% 1fr;
+        grid-template-rows: 1fr 1fr 80% 1fr;
+    };
+    @media (orientation: portrait) {
+        grid-template-columns: 1fr 10fr 1fr;
+        grid-template-rows: 5fr 3fr 5fr 1fr;
+   }
+}
+.logintitle{
+    @media (orientation: landscape) {
+        grid-area:2/1/span 1/span 3;
+    };
+    @media (orientation: portrait) {
+        grid-area:2/2/span 1/span 1;
+   }
+   h6{
+       color:red
+   }
+}
+.loginpad{
+    @media (orientation: landscape) {
+        grid-area:3/2/span 1/span 1;
+    };
+    @media (orientation: portrait) {
+        grid-area:3/2/span 1/span 1;
+   }
+   .numbutton{
+   font-size:7vh !important;
+   margin:auto;
+   align-items: center;
+   justify-content: center;
+   height:80%;
+   }
+
+    .numpadwrapper{
+        width:100%;
+        margin: 0 auto;
+        height:100%;
+        .numpadInnerWrapper{
+            height:100%;
+        }
+        .numbutton{
+            width: 20vw;
+            height:20vw;
+            line-height: calc(min(20vw,15vh));
+            max-width: 15vh;
+            max-height: 15vh;
+            margin-top: 1vh;
+            margin-bottom: 1vh;
+            border: thin black solid;
+            border-radius: 15vh;
+            text-align: center;
+        }
+    }
+
+}
