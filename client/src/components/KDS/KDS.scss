@@ -1,0 +1,381 @@
+// KDS.scss
+html, body {
+  overscroll-behavior-x: none;
+}
+// Overall container for the KDS display
+.kds-container {
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  height: 95vh;
+  background-color: #000;
+  color: #fff;
+  font-family: Arial, sans-serif;
+  //padding: 1rem;
+  user-select: none;         /* Standard */
+  -webkit-user-select: none; /* Chrome, Safari */
+  -moz-user-select: none;    /* Firefox */
+  -ms-user-select: none;     /* Internet Explorer/Edge */
+
+  
+}
+
+// Header styling for the KDS component
+.kds-header {
+  margin-bottom: 1rem;
+
+  h1 {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+    color: #fff;
+    text-align: left;
+  }
+
+  p {
+    font-size: 1rem;
+    color: #ccc;
+    text-align: left;
+  }
+}
+
+// Carousel container with horizontally scrolling columns
+.kds-carousel {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: wrap; // allows vertical wrapping
+  overflow-x: auto; // horizontal scrolling
+  //scroll-behavior: smooth;
+  gap: 1rem;
+  height: 95vh;
+  //padding-bottom: 1rem;
+  align-content: flex-start;
+  justify-content: flex-start;
+
+  // Hide scrollbars
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+
+  //draw border around the number
+  .order-number {
+    font-size: 1.2rem; // Increased font size for order numbers
+    margin-left: 0.5rem;
+    border: 1px solid #fff;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+  }
+
+  // Fixes slow scrolling with trackpad
+  -webkit-overflow-scrolling: touch;
+}
+
+// Summary bar placed at the bottom
+.kds-summary {
+  background-color: #000;
+  color: #fff;
+  //border: 1px solid #fff;
+  //border-radius: 4px;
+  min-height: 5vh;
+  //hide on mobile devices
+  @media (max-width: 768px) {
+    display: none;
+  }
+  margin-top: 1rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 1rem;
+  h2 {
+    font-size: 1.2rem;
+    margin-bottom: 0.5rem;
+  }
+
+  ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  li {
+    font-size: 1rem;
+  }
+}
+
+// Station colors
+.station-grill {
+  color: #00FFFF; // Red
+}
+
+.station-prep {
+  color: #39FF14; // Green
+}
+
+.station-fryer {
+  color: #FFD700; // Yellow
+}
+
+.station-pickup {
+  color: #FFFFFF; // White
+}
+
+.station-pizza {
+  color: #FF6F00; // Orange
+}
+
+.station-sweets {
+  color: #FF2D95; // Purple
+}
+
+.station-default {
+  color: #CCCCCC; // Default color
+}
+
+span.fulfilled{
+  color: #4c66af !important;
+}
+
+span.ready{
+  color: #4caf50 !important;
+}
+
+/* KDS.scss */
+.status-dot {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: red;
+  &.ok { background: #61d836; }   // green
+}
+
+
+// Order tickets styling
+.kds-order {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto; // flexible height based on content
+  width: calc(20% - 1rem); // ensures exactly 5 columns
+  min-width: 250px;
+  background-color: #000;
+  border-left: 3px solid #fff;
+  border-right: 3px solid #fff;
+  margin-right: 1rem;
+  box-shadow: 0 2px 4px rgba(255, 255, 255, 0.1);
+  padding: 0.75rem;
+  text-align: left;
+
+  &.first {
+    border-top: 3px solid #fff;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    &:not(.last) {
+      height: 100%;
+    }
+  }
+
+  &.last {
+    border-bottom: 3px solid #fff;
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
+  }
+
+  &.middle {
+    height: 100%;
+  }
+
+
+  &.pending {
+    border-color: #4caf50;
+  }
+
+  &.ready {
+    border-color: #4c66af;
+  }
+  
+  .order-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+
+    h3 {
+      margin: 0;
+      font-size: 1.5rem;
+      color: #fff;
+    }
+
+    i {
+      font-size: 1rem;
+      color: #ccc;
+    }
+  }
+
+  p {
+    margin: 0.3rem 0;
+    font-size: 1.1rem;
+  }
+
+  ul.order-items {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 1.5rem; // Increased font size for better readability
+
+  }
+
+  ul.order-items li {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #444;
+
+    &:last-child {
+      border-bottom: none;
+    }
+
+    strong {
+      font-size: 1rem;
+      color: #fff;
+    }
+
+    .instructions {
+      font-style: italic;
+      font-size: 1.2rem; // Increased font size for special instructions
+      margin-top: 0.25rem;
+    }
+
+    .item-controls {
+      margin-top: 0.25rem;
+      font-size: 0.85rem;
+    }
+
+    .status-checkbox {
+     &.ready {
+      //checkbox color blue
+      accent-color: #4caf50;
+    }
+    &.fulfilled {
+      accent-color: #4c66af;
+    }
+
+  }
+  }
+
+  .order-footer {
+    margin-top: 0.5rem;
+
+    button.mark-ready {
+      background-color: #000;
+      color: #4caf50;
+      border: 2px solid #4caf50;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: border-color 0.2s ease;
+
+      &:hover {
+        border-color: #43a047;
+      }
+    }
+
+    .all-ready-button {
+      background-color: #4caf50;
+      color: #fff;
+      border: none;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+
+      &:hover {
+        background-color: #43a047;
+      }
+
+      &.half {
+        width: 49%;
+        display: inline-block;
+      }
+    }
+	
+    .reverse-button {
+      background-color: #000;
+      color: white;
+      border: 2px solid white;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: border-color 0.2s ease;
+
+      &:hover {
+        border-color: grey;
+        color: grey;
+      }
+    }
+    
+    .all-fulfilled-button {
+      background-color: #4c66af;
+      color: #fff;
+      border: none;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+
+      &:hover {
+        background-color: #4543a0;
+      }
+
+      &.half {
+        width: 49%;
+        display: inline-block;
+      }
+    }
+  }
+}
+
+
+@keyframes flash-border {
+  0% {
+    border-color: #fff;
+    background-color: #111;
+  }
+  50% {
+    border-color: #ffcc00;
+    background-color: #333;
+  }
+  100% {
+    border-color: #fff;
+    background-color: #111;
+  }
+}
+
+.kds-order.long-pressing {
+  animation: flash-border 0.5s infinite;
+}
+
+.kds-order .order-footer .flashing {
+  background-color: #ffcc00 !important;
+  color: #000 !important;
+  border: none !important;
+  font-weight: bold;
+}
+.flashing {
+  animation: pulse 0.5s ease-in-out;
+}
+
+@keyframes pulse {
+  0% {
+    background-color: #ffc;
+  }
+  50% {
+    background-color: #ff0;
+  }
+  100% {
+    background-color: #ffc;
+  }
+}
