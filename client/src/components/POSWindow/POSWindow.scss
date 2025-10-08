@@ -1,0 +1,392 @@
+.poswindow {
+	touch-action: none;
+
+
+	.overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background: rgba(0, 0, 0, 0.6);
+		/* Dark semi-transparent background */
+		z-index: 9999;
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		transition: opacity 0.3s ease-in-out;
+
+		.submission-message {
+			background-color: #ffffff;
+			padding: 20px;
+			border-radius: 10px;
+			box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+			text-align: center;
+			max-width: 400px;
+			width: 90%;
+			animation: fadeIn 0.5s ease;
+		}
+
+		.submission-message p {
+			font-size: 18px;
+			font-weight: bold;
+			margin-bottom: 20px;
+			color: #333;
+		}
+
+		.cancel-button {
+			padding: 10px 20px;
+			margin-top: 1vw;
+			background-color: #f44336;
+			color: white;
+			border: none;
+			border-radius: 5px;
+			cursor: pointer;
+			font-size: 16px;
+			transition: background-color 0.3s ease;
+		}
+
+		.cancel-button:hover {
+			background-color: #d32f2f;
+		}
+
+		@keyframes fadeIn {
+			from {
+				opacity: 0;
+				transform: translateY(-10px);
+			}
+
+			to {
+				opacity: 1;
+				transform: translateY(0);
+			}
+		}
+	}
+
+
+
+
+	.fulfilled {
+		color: #4c66af !important;
+		opacity: .5;
+	}
+
+	.cancelled {
+		//crossthrough
+		text-decoration: line-through;
+	}
+
+	.posInput {
+		height: 35%;
+		width: 80%;
+		padding: 0;
+		margin: 0;
+		background: none;
+		/* Remove the default background */
+		border: none;
+		/* Remove the default border */
+		border-bottom: 2px solid #333;
+		/* Add a bottom border */
+		outline: none;
+		/* Remove the outline when the input is focused */
+		transition: border-color 0.3s;
+		/* Transition for a smooth effect */
+		font-size: 16px;
+		display: inline-block;
+	}
+
+	.searchbutton {
+		width: 10%;
+		font-size: 10px;
+		//no text wrap
+		white-space: nowrap;
+		overflow: hidden;
+		//flex box
+		display: inline-block;
+
+	}
+
+	.posInput:focus {
+		border-color: green;
+		/* Change the bottom border color when the input is focused */
+	}
+
+	.cashiername {
+		opacity: 0.5;
+	}
+
+	button {
+		transition: background-color 0.2s, color 0.2s !important;
+	}
+
+	button {
+		background-color: #000000;
+		color: white;
+		border: none;
+	}
+
+	button:hover {
+		background-color: blue;
+		color: white;
+	}
+
+	button:active {
+		background-color: #0040a0;
+		color: white;
+	}
+
+	background-color: rgb(231, 230, 230);
+	background-color: #f8f8f8;
+
+	position: fixed;
+	width: 100vw;
+	height: 95vh;
+	left: 0;
+	top: 0;
+	box-sizing: border-box;
+	display: grid;
+
+	@media (orientation: landscape) {
+		grid-template-columns: 65% 35%;
+		grid-template-rows: 15% 70% 15%;
+	}
+
+	@media (orientation: portrait) {
+		grid-template-columns: 2fr 1fr;
+		grid-template-rows: 10% 34% 1% 50% 5%;
+	}
+
+	cursor: pointer;
+	user-select: none;
+
+	p {
+		font-size: calc(min(2.5vw, 2vh, 30px));
+		margin: 0;
+	}
+
+	h1 {
+		margin-bottom: 0;
+		font-size: calc(min(5vw, 3vh, 30px));
+	}
+
+	.buttonheader {
+		display: grid;
+		grid-template-rows: auto auto auto auto;
+		gap: 0.5vh;
+		padding: 0.5vw;
+		height: 100%;
+		width: 100%;
+		box-sizing: border-box;
+		text-align: left;
+		overflow-y: hidden;
+
+		h3 {
+			margin: 0;
+			font-size: clamp(12px, 2vh, 24px);
+			grid-row: 1;
+		}
+
+		.attendance-row, .calendar-row {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 1vw;
+			align-items: center;
+			font-size: clamp(10px, 1.5vh, 18px);
+			padding: 0.2vh 0;
+			@media (orientation: portrait) {
+				display: none;
+			}
+		}
+
+		.attendance-row {
+			grid-row: 2;
+		}
+
+		.calendar-row {
+			grid-row: 3;
+		}
+
+		.cashiername {
+			opacity: 0.7;
+			white-space: nowrap;
+			cursor: pointer;
+			
+			&:hover {
+				opacity: 1;
+			}
+		}
+
+		.search-row {
+			grid-row: 4;
+			display: grid;
+			grid-template-columns: 5fr 1fr 1fr;
+			gap: .1vw;
+			align-items: center;
+			justify-items: right;
+			width: 100%;
+			grid-column-gap: 1vw;
+
+			.posInput {
+				height: clamp(24px, 4vh, 40px);
+				width: 100%;
+				margin: auto;
+				background: none;
+				border: none;
+				border-bottom: 2px solid #333;
+				outline: none;
+				transition: border-color 0.3s;
+				font-size: clamp(12px, 1.5vw, 20px);
+
+				&:focus {
+					border-color: green;
+				}
+			}
+
+			.searchbutton {
+				height: clamp(24px, 4vh, 40px);
+				width: 100%;
+				padding: 0 1vw;
+				font-size: clamp(10px, 1.2vw, 16px);
+				white-space: nowrap;
+				min-width: max-content;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				@media (orientation: portrait) {
+					display: none;
+				}
+			}
+		}
+
+		@media (orientation: landscape) {
+			grid-area: 1/1/1/1;
+		}
+
+		@media (orientation: portrait) {
+			grid-area: 1/1 / span 1 / span 1;
+		}
+	}
+
+	.buttonpanel {
+		@media (orientation: landscape) {
+			grid-area: 2/1 / span 2/1;
+		}
+
+		@media (orientation: portrait) {
+			grid-area: 4/1 / span 1 / span 2;
+		}
+	}
+
+	.orderheader {
+		@media (orientation: landscape) {
+			grid-area: 1/2/1/2;
+			//height:14.25vh;
+		}
+
+		@media (orientation: portrait) {
+			grid-area: 1/2 / span 1 / span 1;
+			//height:9.5vh;
+		}
+
+		font-size: calc(min(5vw, 1.5vh, 30px));
+		padding: 1vw;
+
+		.customerInfo {
+			p {
+				margin: 0;
+			}
+		}
+	}
+
+	.receipt {
+		@media (orientation: landscape) {
+			grid-area: 2/2 / span 1 / span 1;
+		}
+
+		@media (orientation: portrait) {
+			grid-area: 2/1 / span 1 / span 2;
+		}
+
+		touch-action: manipulation;
+	}
+
+	/* hides button panel when online order pulled up
+	
+	.hidebuttonpanel {
+		@media (orientation: portrait) {
+			display: none;
+		}
+	}
+	
+	.bigreceipt {
+	@media (orientation: landscape) {
+		grid-area: 2/2 / span 1 / span 1;
+	}
+	@media (orientation: portrait) {
+		grid-area: 2/1 / span 3 / span 2;
+	}
+	}*/
+
+	body {
+		font-family: "SF Pro Display", "Roboto", sans-serif !important;
+		font-size: 16px !important;
+		color: #333 !important;
+	}
+
+	h1 {
+		font-weight: 600 !important;
+		margin-bottom: 0.5rem !important;
+	}
+
+	p {
+		font-weight: 400 !important;
+		margin-bottom: 0.5rem !important;
+	}
+
+	.buttonheader,
+	.buttonpanel,
+	.orderheader,
+	.receipt,
+	.numpadPOSwrapper,
+	.editCustomer {
+		border-radius: 12px !important;
+	}
+
+	.editCustomer {
+		z-index: 1;
+	}
+
+	/*.buttonheader, .buttonpanel, .orderheader, .receipt, .numpadPOSwrapper {
+        padding: 1rem !important;
+        margin: 0.5rem !important;
+      }*/
+
+	/* Container for both modals */
+	.modal-container {
+		display: flex;
+		justify-content: space-evenly;
+		align-items: flex-start;
+		position: absolute;
+		left: 10%;
+		width: 80%;
+		top: 10%;
+		padding: 10px;
+		gap: 10px;
+		/* Reduced gap to move the modals closer together */
+		box-sizing: border-box;
+		z-index: 1001;
+		/* Ensure it's above the backdrop */
+	}
+
+	/* Black backdrop to emphasize modals */
+	.modal-backdrop {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background-color: rgba(0, 0, 0, 0.5);
+		z-index: 1000;
+		/* Below the modals */
+	}
+}

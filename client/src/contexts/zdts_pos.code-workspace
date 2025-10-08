@@ -1,0 +1,31 @@
+{
+	"folders": [
+		{
+			"name": "zdts_pos",
+			"path": "../../../.."
+		},
+		{
+			"name": "zdt-jungle",
+			"path": "../../../../../zdt-jungle"
+		},
+		{
+			"name": "Portfolio",
+			"path": "../../../../../Portfolio"
+		},
+		{
+			"name": "kds-app",
+			"path": "../../../../../kds-app"
+		},
+		{
+			"name": "electronpos-public",
+			"path": "../../../../../electronpos-public"
+		},
+		{
+			"path": "../../../../../pos-webhooks"
+		},
+		{
+			"path": "../../../../../zdtsAdventurePlaza"
+		}
+	],
+	"settings": {}
+}

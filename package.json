@@ -1,0 +1,103 @@
+{
+  "name": "pos-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "18.16.1",
+    "yarn": "1.22.19"
+  },
+  "dependencies": {
+    "@babel/core": "^7.20.12",
+    "@shopify/shopify-api": "^8.0.1",
+    "bcrypt": "^5.1.1",
+    "canvas": "^3.1.0",
+    "cookie-parser": "^1.4.7",
+    "cross-env": "^7.0.3",
+    "electron-updater": "^6.1.7",
+    "express": "^4.17.3",
+    "googleapis": "^128.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "koa-router": "^10.1.1",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.2",
+    "node-fetch": "^2.6.7",
+    "openssl": "^2.0.0",
+    "pg": "^8.13.0",
+    "postcss-normalize": "^13.0.1",
+    "qrcode": "^1.5.4",
+    "react-scripts": "^5.0.1",
+    "sass": "^1.63.6",
+    "serve": "^13.0.2",
+    "shopify-api-node": "^3.12.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "stripe": "^8.203.0",
+    "uuid": "^11.0.5"
+  },
+  "scripts": {
+    "start": "node dist/server.js",
+    "heroku-postbuild": "yarn build-server && cd client && yarn install && yarn build",
+    "build": "yarn build-server && yarn build-client",
+    "build-server": "tsc",
+    "build-client": "cd client && yarn build",
+    "client": "cd client && yarn start",
+    "client-local": "cd client && yarn start-local",
+    "appclient": "cd client && set BROWSER=none yarn start",
+    "dev": "concurrently \"cross-env yarn start-dev\" \"wait-on https://localhost:8080 && cross-env yarn client\"",
+    "start-dev": "ts-node -r tsconfig-paths/register server.ts",
+    "start-all": "concurrently \"yarn start-dev\" \"wait-on http://localhost:8080 && yarn client-local\"",
+    "app": "concurrently \"yarn start-dev\" \"wait-on http://localhost:8080 && yarn appclient\"",
+    "test": "jest",
+    "test:unit": "jest --testPathPatterns=unit",
+    "test:integration": "jest --testPathPattern=integration",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:client": "playwright test --project=dashboard-client"
+  },
+  "eslintConfig": {
+    "extends": "react-app"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "main": "dist/server.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
+    "@playwright/test": "^1.40.0",
+    "@types/babel__core": "^7.20.5",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/jest": "^29.0.0",
+    "@types/node": "^16.0.0",
+    "@types/pg": "^8.11.10",
+    "@types/socket.io": "^3.0.2",
+    "@types/socket.io-client": "^3.0.0",
+    "@types/supertest": "^6.0.3",
+    "@types/uuid": "^10.0.0",
+    "concurrently": "^8.2.1",
+    "jest": "^30.2.0",
+    "playwright": "^1.40.0",
+    "shx": "^0.3.4",
+    "supertest": "^7.1.4",
+    "ts-jest": "^29.4.4",
+    "ts-node": "^10.9.1",
+    "typescript": "5.1.6",
+    "wait-on": "^7.0.1"
+  },
+  "packageManager": "yarn@4.9.1+sha512.f95ce356460e05be48d66401c1ae64ef84d163dd689964962c6888a9810865e39097a5e9de748876c2e0bf89b232d583c33982773e9903ae7a76257270986538"
+}

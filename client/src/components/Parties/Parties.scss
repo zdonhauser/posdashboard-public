@@ -1,0 +1,77 @@
+.partieswindow{
+    background-color:rgb(167, 167, 167);
+    position: fixed;
+    width:100vw;
+    height: 95vh;
+    left: 0;
+    top: 0;
+    @media print{top: 0;height:100vh;padding:0;margin:0}
+    box-sizing: border-box;
+    display:grid;
+    grid-template-columns: 1fr 5fr 1fr;
+    grid-template-rows: 1fr 5fr 1fr;
+    cursor:pointer;
+    user-select: none;
+    overflow-y: scroll;
+    .partiesselection{
+        z-index: 1;
+        overflow-y: scroll;
+        @media print{top: 0;height:100vh;padding:0;margin:0}
+        grid-area: 1/1/4/4;
+        padding: 5% 10%;
+        background-color:rgb(255, 255, 255);
+    }
+    
+    
+    
+    select{
+        font-size: 1.2em;
+    }
+    
+    .smallselect{
+        font-size:1em;
+    }
+      
+    input {
+        border-radius: 6px;
+        margin-bottom: 6px;
+        padding: 12px;
+        border: 1px solid black;
+        max-height: 44px;
+        font-size: 16px;
+        background: white;
+        box-sizing: border-box;
+    }
+    
+    textarea{
+        width:100%
+    }
+    
+    .partyTitle{
+        text-decoration: underline;
+    }
+    
+    
+    
+    
+    .partiesListed{
+        display:grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr;
+        @media screen and (max-width: 600px) {
+            grid-template-columns: 1fr;
+            grid-template-rows: 1fr 1fr;
+            overflow-x: scroll;
+            .largePartyList{
+                grid-area: 1/1/2/2;
+                width:100%;
+            }
+            .carouselPartyList {
+                grid-area: 2/1/3/2;
+                width: 100%;
+            }
+        }
+    }
+    
+    
+}

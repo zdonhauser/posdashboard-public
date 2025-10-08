@@ -1,0 +1,405 @@
+.reportswindow {
+  position: fixed;
+  width: 100vw;
+  height: 95vh;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 1fr 5fr 1fr;
+  grid-template-rows: 1fr 5fr 1fr;
+  overflow-y: auto;
+  font-family: Arial, sans-serif;
+
+  .confirm-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+  
+  .confirm-box {
+    background: #fff;
+    padding: 1.25rem;
+    border-radius: 6px;
+    max-width: 320px;
+    width: 90%;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    text-align: center;
+  }
+  
+  .confirm-box p {
+    margin-bottom: 1rem;
+    font-size: 1rem;
+  }
+  
+  .confirm-buttons {
+    display: flex;
+    justify-content: space-around;
+  }
+  
+  .confirm-buttons button {
+    padding: 0.4rem 1rem;
+    font-size: 0.9rem;
+  }
+}
+
+.confirm-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.confirm-box {
+  background: #fff;
+  padding: 1.25rem;
+  border-radius: 6px;
+  max-width: 320px;
+  width: 90%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  text-align: center;
+}
+
+.confirm-box p {
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.confirm-buttons {
+  display: flex;
+  justify-content: space-around;
+}
+
+.confirm-buttons button {
+  padding: 0.4rem 1rem;
+  font-size: 0.9rem;
+}
+
+@media print {
+  .reportswindow {
+      position: static !important;
+      width: auto !important;
+      height: auto !important;
+      overflow: visible !important;
+      grid-template-columns: 1fr !important;
+      grid-template-rows: auto !important;
+      padding: 0;
+      margin: 0;
+  }
+
+  .report {
+      padding: 1% 2%;
+      page-break-inside: avoid;
+  }
+
+  .report-table {
+      width: 100%;
+      font-size: 0.5em; /* Reduce font size for print */
+  }
+
+  .report-table th,
+  .report-table td {
+      padding: 2px !important;
+      font-size: 0.5em; /* Further reduce font size */
+  }
+
+  .smallButton, .outputTable, .itemizedReport {
+      display: none !important;
+  }
+
+  h3 {
+      padding: 5px;
+      margin: 0;
+  }
+
+  input {
+      font-size: 10px;
+      border: none;
+      padding: 5px;
+  }
+}
+
+.report {
+  z-index: 1;
+  grid-area: 1/1/4/4;
+  padding: 5% 10%;
+  background-color: #ffffff;
+}
+
+.salesByProcessor {
+  margin: auto;
+  width: 600px;
+}
+
+.salesByProcessor th {
+  text-align: center;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+.salesByProcessor td {
+  border: 1px solid #ccc;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+@media print {
+  .salesByProcessor td,
+  .salesByProcessor th {
+      font-size: 0.5em;
+      padding: 2px !important;
+  }
+}
+
+.salesByCategory {
+  margin: auto;
+  width: 600px;
+}
+
+.salesByCategory th {
+  text-align: center;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+.salesByCategory td {
+  border: 1px solid #ccc;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+@media print {
+  .salesByCategory td,
+  .salesByCategory th {
+      font-size: 0.5em;
+      padding: 2px !important;
+  }
+}
+
+.resetButton {
+  @media print {
+      display: none;
+  }
+}
+
+.ccType {
+  display: inline-block;
+  margin: 2%;
+  padding: 1%;
+  width: 20%;
+  height: auto;
+  border: solid 1px #ccc;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.salesByItem {
+  td {
+      border: 1px solid #ccc;
+      font-size: 1em;
+      padding: 0 20px;
+  }
+
+  tr {
+      max-width: 40vw;
+  }
+
+  table {
+      margin: auto;
+      display: table;
+  }
+
+  table tr {
+      display: table-cell;
+  }
+
+  table tr td {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+  }
+}
+
+@media print {
+  .salesByItem {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(50%, 1fr));
+      column-gap: 20px;
+      page-break-inside: avoid;
+  }
+
+  .salesByItem table {
+      width: 100%;
+      font-size: 0.5em; /* Reduce font size for print */
+  }
+
+  .salesByItem th,
+  .salesByItem td {
+      padding: 2px !important;
+      font-size: 0.5em; /* Further reduce font size */
+  }
+}
+
+.outputTable {
+  margin: auto;
+  th {
+      text-align: center;
+  }
+  td,
+  th {
+      border: 1px solid #ccc;
+      font-size: 0.5em;
+      padding: 0 20px;
+  }
+  @media print {
+      display: none;
+  }
+}
+
+.allSales {
+  td {
+      border: 1px solid #ccc;
+      font-size: 0.8em;
+      width: 40vw;
+  }
+}
+
+.catTable {
+  margin: auto;
+  width: 600px;
+}
+
+.catTable th {
+  text-align: center;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+.catTable td {
+  border: 1px solid #ccc;
+  font-size: 1em;
+  padding: 0 20px;
+}
+
+@media print {
+  .catTable td,
+  .catTable th {
+      font-size: 0.5em;
+      padding: 2px !important;
+  }
+}
+
+.disabledInput {
+  pointer-events: none !important;
+}
+
+.smallButton {
+  width: 30%;
+  margin: 3% auto;
+  background-color: black;
+  color: white;
+  border: 1px solid #ccc;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.smallButton:hover {
+  background-color: white;
+  color: black;
+}
+
+.tinyButton {
+  width: 10%;
+  margin: 0 auto;
+  font-size: 0.5em;
+  padding: 0.5%;
+  background-color: #f2f2f2;
+  border: 1px solid #ccc;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.tinyButton:hover {
+  background-color: #e0e0e0;
+}
+
+.smallText {
+  font-size: 0.5em;
+}
+
+.report-table {
+  width: 80%;
+  margin: 0 auto;
+  border-collapse: collapse;
+  font-family: Arial, sans-serif;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.report-table th,
+.report-table td {
+  padding: 10px;
+  text-align: left;
+  border: 1px solid #e0e0e0;
+}
+
+.report-table th {
+  background-color: #f2f2f2;
+  font-weight: bold;
+}
+
+.report-table tbody tr:nth-child(even) {
+  background-color: #f9f9f9;
+}
+
+.report-table tfoot {
+  font-weight: bold;
+  background-color: #e0e0e0;
+}
+
+.itemizedReport {
+  @media print {
+      display: none;
+  }
+}
+
+/* Restored Button Styles */
+button {
+  background: black;
+  font-family: Arial, sans-serif;
+  color: #ffffff;
+  border: 0;
+  padding: 12px 16px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  display: block;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+button:hover {
+  filter: contrast(115%);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+* {
+  outline: none;
+}

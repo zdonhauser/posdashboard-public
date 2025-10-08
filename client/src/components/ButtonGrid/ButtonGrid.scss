@@ -1,0 +1,459 @@
+.ButtonGrid {
+  position: relative;
+  display: grid;
+  height: calc(100% - #{1vh});
+  width: calc(100% - #{1vw});
+  margin: 0.5vh 0.5vw;
+  grid-template-columns: repeat(420, calc(100% / 420));
+  grid-template-rows: repeat(460, calc(100% / 460));
+
+  .isDelete {
+    border-color: red !important;
+  }
+
+  .mod-button {
+    background-color: rgba(0, 128, 0, 0.1) !important;
+  }
+  /*
+  .kds-enabled {
+    text-decoration: underline;
+  }
+
+
+  .kds-fulfillable {
+    font-weight: bold;
+  }
+  */
+  .modmod-button {
+    background-color: rgba(0, 128, 0, 0.2) !important;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent black background */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1050;
+    /* High z-index to be on top */
+  }
+
+  .member-alert {
+    text-shadow: none;
+    color: red;
+  }
+
+  .modal-content {
+    background: white;
+    display: flex;
+    justify-content: space-evenly;
+    flex-direction: column;
+    align-items: flex-start;
+    position: absolute;
+    left: 10%;
+    width: 80%;
+    top: 10%;
+    padding: 10px;
+    gap: 10px;
+    /* Reduced gap to move the modals closer together */
+    box-sizing: border-box;
+    border-radius: 5px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    z-index: 1051;
+    /* Higher than overlay to be on top */
+
+  }
+
+  .shopify-connector {
+    background: white;
+    display: flex;
+    justify-content: space-evenly;
+    align-items: center;
+    flex-direction: column;
+    position: absolute;
+    left: 10%;
+    width: 80%;
+    top: 10%;
+    padding: 10px;
+    gap: 10px;
+    /* Reduced gap to move the modals closer together */
+    box-sizing: border-box;
+    border-radius: 5px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    z-index: 1051;
+    /* Higher than overlay to be on top */
+  }
+
+  /* Optional: Close button styling */
+  .close-button {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: none;
+    border: none;
+    font-size: 1.5em;
+    cursor: pointer;
+  }
+
+  /* If you want to add animations */
+  .modal-overlay {
+    animation: fadeIn 0.3s;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
+  .modal-content {
+    animation: slideIn 0.3s;
+  }
+
+  @keyframes slideIn {
+    from {
+      transform: translateY(-50px);
+    }
+
+    to {
+      transform: translateY(0);
+    }
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 1000;
+    width: auto;
+    background: white;
+    border: 1px solid #ccc;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+  }
+
+  .context-menu ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .context-menu ul li {
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+
+  .context-menu ul li:hover {
+    background-color: #f5f5f5;
+  }
+
+  .loading-box {
+    padding: 20px;
+    width: 640px;
+    height: 480px;
+    text-align: center;
+    background-color: #f3f3f3;
+    border: 1px solid #ddd;
+  }
+
+  .video-stream.hidden {
+    display: none;
+  }
+
+  .tabs {
+    width: 100%;
+    display: flex;
+    justify-content: space-around;
+    z-index: 1;
+    padding: 0;
+    grid-column: 1 / span 10;
+    grid-row: 1;
+  }
+
+  .tab-button {
+    background-color: black !important;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    border-radius: 4px 4px 0 0;
+  }
+
+  .tab-button.active {
+    background-color: white !important;
+    color: black !important;
+  }
+
+  .modal {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    /* for a semi-transparent backdrop */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .emptybutton {
+    border: solid;
+    border-color: grey;
+    border-width: 1px;
+    background-color: lightgrey;
+  }
+
+  .button {
+    width: 100%;
+    position: relative;
+    border: solid;
+    border-color: black;
+    border-width: 1px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    overflow: hidden;
+
+    &.no_station {
+        background-color: white;
+      }
+
+    &.grill {
+      background-color: #ffe4e8;
+    }
+
+    &.fryer {
+      background-color: #fffbdf;
+    }
+
+    &.pickup {
+      background-color: #ffffffe5;
+    }
+
+    &.pizza {
+      background-color: #ffe4d4;
+    }
+
+    &.sweets {
+      background-color: #f6e2ff;
+    }
+  }
+
+  .buttontext {
+    width: 100%;
+    max-height: 100%;
+    font-weight: bold;
+    font-size: min(1vw, 2vh);
+
+    @media (max-width: 600px) {
+      font-size: 2.5vw;
+    }
+
+    padding: 0 0.2vw;
+    word-break: break-word;
+    hyphens: auto;
+
+    .buttonprice {
+      font-size: min(1vw, 1.5vh);
+
+      @media (max-width: 600px) {
+        font-size: 1.5vw;
+      }
+
+      color: grey;
+    }
+
+    .buttonsubtotal {
+      font-size: min(1vw, 1.5vh);
+
+      @media (max-width: 600px) {
+        font-size: 1.5vw;
+      }
+
+      color: grey;
+    }
+  }
+
+  .image.buttontext {
+    color: white;
+    position: absolute;
+    bottom: 0;
+    /* Align text to the bottom */
+    width: 100%;
+    /* Ensure it spans the width of the div */
+    padding: 0;
+    /* Add some padding */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect */
+    background: linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0) 20%,
+      rgba(0, 0, 0, 0.5) 100%
+    );
+    text-align: right;
+  }
+
+  .edit-member {
+    color: white;
+    position: absolute;
+    top: 10px;
+    /* Adjusted for visual appearance */
+    right: 10px;
+    /* Adjusted for consistency and to avoid being too close to the edge */
+    padding: 5px 15px;
+    /* Increased padding for a more button-like appearance */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect for better readability */
+    background: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent black background */
+    border-radius: 20px;
+    /* Rounded corners for the pill shape */
+    cursor: pointer;
+    /* Change cursor to pointer to indicate it's clickable */
+    font-size: 0.9em;
+    /* Adjust font size as needed */
+    border: 1px solid white;
+    /* Optional: adds a border to make the button stand out */
+  }
+
+  .add-barcode {
+    color: white;
+    position: absolute;
+    bottom: 10px;
+    /* Adjusted for visual appearance */
+    left: 10px;
+    /* Adjusted for consistency and to avoid being too close to the edge */
+    padding: 5px 15px;
+    /* Increased padding for a more button-like appearance */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect for better readability */
+    background: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent black background */
+    border-radius: 20px;
+    /* Rounded corners for the pill shape */
+    cursor: pointer;
+    /* Change cursor to pointer to indicate it's clickable */
+    font-size: 0.7vw !important;
+    /* Adjust font size as needed */
+    border: 1px solid white;
+    /* Optional: adds a border to make the button stand out */
+    z-index: 9000;
+  }
+
+  .all-members {
+    color: white;
+    position: absolute;
+    top: 50px;
+    /* Adjusted for visual appearance */
+    right: 10px;
+    /* Adjusted for consistency and to avoid being too close to the edge */
+    padding: 5px 15px;
+    /* Increased padding for a more button-like appearance */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect for better readability */
+    background: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent black background */
+    border-radius: 20px;
+    /* Rounded corners for the pill shape */
+    cursor: pointer;
+    /* Change cursor to pointer to indicate it's clickable */
+    font-size: 0.9em;
+    /* Adjust font size as needed */
+    border: 1px solid white;
+    /* Optional: adds a border to make the button stand out */
+  }
+
+  .new-photo {
+    color: white;
+    position: absolute;
+    top: 10px;
+    /* Adjusted for visual appearance */
+    left: 10px;
+    /* Adjusted for consistency and to avoid being too close to the edge */
+    padding: 5px 15px;
+    /* Increased padding for a more button-like appearance */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect for better readability */
+    background: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent black background */
+    border-radius: 20px;
+    /* Rounded corners for the pill shape */
+    cursor: pointer;
+    /* Change cursor to pointer to indicate it's clickable */
+    font-size: 0.9em;
+    /* Adjust font size as needed */
+    border: 1px solid white;
+    /* Optional: adds a border to make the button stand out */
+  }
+
+  .alert {
+    font-size: 80%;
+    margin-bottom: 0 !important;
+  }
+
+  .bffAlert {
+    font-size: 1rem;
+    margin-bottom: 0 !important;
+  }
+
+  .view-member {
+    color: white;
+    position: absolute;
+    top: 0;
+    /* Align text to the bottom */
+    right: 0;
+    padding: 0;
+    /* Add some padding */
+    text-shadow: 1px 1px 2px black;
+    /* Black outline effect */
+    background: rgba(0, 0, 0, 0.5);
+    /* Semi-transparent background */
+  }
+
+  .image.premium {
+    background: linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0) 30%,
+      rgba(218, 165, 32, 0.5) 100%
+    );
+  }
+
+  .premium {
+    background: linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0) 30%,
+      rgba(218, 165, 32, 0.5) 100%
+    );
+  }
+
+  .inactive {
+    background: linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0) 30%,
+      rgba(249, 38, 38, 0.7) 100%
+    );
+
+    //bottom:50%; /* Align text to the bottom */
+    //border-top:red solid 10px;
+    //border-bottom:red solid 10px;
+    overflow: hidden;
+  }
+
+  div.inactive::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(248, 248, 248, 0.7);
+    /* Black color with 50% opacity */
+    z-index: 0;
+  }
+}

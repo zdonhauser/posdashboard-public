@@ -1,0 +1,5256 @@
+import express, { Request, Response } from "express";
+import fetch from "node-fetch";
+import bodyParser from "body-parser";
+import path from "path";
+import http from "http";
+import multer from "multer";
+import { File } from "multer";
+import fs from "fs";
+import jwt from "jsonwebtoken";
+import https from "https";
+import { Readable } from "stream";
+import crypto from "crypto";
+import { PoolClient } from "pg";
+import bcrypt from "bcrypt";
+import { Server as SocketIOServer } from "socket.io";
+import { ParsedQs } from "qs";
+
+import { env, isElectron, isProduction } from "@config/environment";
+import { initializeDatabase, pool, queryDB } from "@config/database";
+import { auth, drive } from "@config/google-drive";
+import { stripe } from "@config/stripe";
+import { shopifyConfig } from "@config/shopify";
+import { registerWebhookRoutes } from "@routes/webhooks";
+import { createQrGenerator } from "@utils/qr-generator";
+import { createCardGenerator } from "@utils/card-generator";
+import { handleLockout, resetLockout } from "@utils/auth";
+import { getClientIp, verifyPasscode } from "@middleware/auth";
+import employeeRoutes, { employeePublicRoutes } from "@routes/employees";
+
+const ADMIN_PASSCODE_HASH = env.admin.passcodeHash;
+const shopName = shopifyConfig.shopName;
+const shopifyToken = shopifyConfig.accessToken;
+const SEAL_TOKEN = env.seal.token;
+
+// Dynamically require `canvas` only when not in Electron
+let createCanvas, loadImage;
+
+if (!process.versions.electron) {
+  ({ createCanvas, loadImage } = require("canvas"));
+}
+
+interface MulterRequest extends Request {
+  file: File;
+  body: {
+    membership_number: string;
+    // Add other properties if needed
+  };
+}
+
+const app = express();
+
+initializeDatabase();
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+registerWebhookRoutes(app, {
+  enableShopifyOrderRoutes: !isElectron(),
+});
+
+if (!isElectron()) {
+  const qrGenerator = createQrGenerator();
+  const resolveAssetPath = (relativePath: string) =>
+    path.resolve(
+      __dirname,
+      isProduction()
+        ? `../public/${relativePath}`
+        : `./public/${relativePath}`
+    );
+
+  const cardGenerator =
+    createCanvas && loadImage
+      ? createCardGenerator({
+          createCanvas,
+          loadImage,
+          resolveAssetPath,
+          generateQrCodeBuffer: (data, options) =>
+            qrGenerator.generate(data, options),
+        })
+      : null;
+
+  app.get("/qr/:data.jpg", async (req, res) => {
+    const data = req.params.data;
+
+    try {
+      const imageBuffer = await qrGenerator.generate(data);
+      res.setHeader("Content-Type", "image/jpg");
+      res.setHeader("Content-Disposition", `inline; filename="${data}.jpg"`);
+      res.end(imageBuffer);
+    } catch (error) {
+      console.error("Error generating QR code:", error);
+      res.status(500).send("Error generating QR code");
+    }
+  });
+
+  app.get("/card/:cardType/:data/:type.png", async (req, res) => {
+    if (!cardGenerator) {
+      console.error(
+        "Card generator unavailable: canvas dependencies missing."
+      );
+      return res.status(500).send("Error generating ticket image");
+    }
+
+    const cardType = decodeURIComponent(req.params.cardType);
+    const data = decodeURIComponent(req.params.data);
+    const type = decodeURIComponent(req.params.type).replace(/\+/g, " ");
+
+    try {
+      const buffer = await cardGenerator.generate({
+        cardType,
+        data,
+        type,
+      });
+      res.setHeader("Content-Type", "image/png");
+      res.end(buffer);
+    } catch (error) {
+      console.error("Error generating ticket image:", error);
+      res.status(500).send("Error generating ticket image");
+    }
+  });
+}
+
+app.use(express.static(path.join(__dirname, "client/build")));
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+// Moved to src/middleware/auth.ts
+app.post("/api/validate-device", async (req, res) => {
+  const { deviceId } = req.body;
+  const result = await queryDB(
+    "SELECT device_id FROM approved_devices WHERE device_id = $1",
+    [deviceId]
+  );
+
+  res.json({ approved: result.rows.length > 0 });
+});
+
+// Moved to src/middleware/auth.ts - using imported verifyPasscode
+app.post("/api/verify-passcode", verifyPasscode);
+
+// Employee public routes - no JWT required (before the JWT middleware)
+// Employee login endpoint must come before the JWT middleware so employees can log in
+app.use("/api", employeePublicRoutes);
+
+//check token - JWT middleware for all other /api/ routes
+app.use("/api/", (req, res, next) => {
+  // Get the token from the header
+  const token = req.headers.authorization?.split(" ")[1]; // Assuming the header format is: "Authorization: Bearer YOUR_TOKEN"
+  if (!token) {
+    return res.status(403).send({ error: "No token provided." });
+  }
+
+  // Verify the token
+  jwt.verify(token, process.env.JWT_SECRET || "default-jwt-secret", (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ error: "Failed to authenticate token." });
+    }
+    // If successful, proceed to the next middleware
+    //req.decoded = decoded;  // Optional: Save the decoded info for use in other routes
+    next();
+  });
+});
+
+// Employee protected routes - JWT required
+// MOVED: Recurring Entries, Employee, and Clock Entry routes to src/routes/employees.ts
+app.use("/api", employeeRoutes);
+
+// OLD IMPLEMENTATION REMOVED - Recurring Entries Endpoints
+/*app.get("/api/recurring-entries", async (req: Request, res: Response) => {
+  try {
+    const { employee_id, start_date, end_date } = req.query;
+    let query = `
+      SELECT * FROM recurring_entries 
+      WHERE ($1::integer IS NULL OR employee_id = $1)
+      AND start_date <= $2::date
+      AND (end_date IS NULL OR end_date >= $3::date)
+    `;
+
+    const values = [
+      employee_id ? parseInt(employee_id as string) : null,
+      end_date || new Date().toISOString().split("T")[0],
+      start_date || new Date().toISOString().split("T")[0],
+    ];
+
+    const result = await queryDB(query, values);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error fetching recurring entries:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/recurring-entries", async (req: Request, res: Response) => {
+  try {
+    const { employee_id, type, amount, description, start_date, end_date } =
+      req.body;
+
+    const query = `
+      INSERT INTO recurring_entries 
+      (employee_id, type, amount, description, start_date, end_date)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `;
+    const values = [
+      employee_id,
+      type,
+      amount,
+      description,
+      start_date,
+      end_date || null,
+    ];
+    const result = await queryDB(query, values);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating recurring entry:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/recurring-entries/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { type, amount, description, start_date, end_date } = req.body;
+
+    const query = `
+      UPDATE recurring_entries 
+      SET type = $1, amount = $2, description = $3, start_date = $4, end_date = $5
+      WHERE id = $6
+      RETURNING *
+    `;
+    const values = [
+      type,
+      amount,
+      description,
+      start_date,
+      end_date || null,
+      id,
+    ];
+    const result = await queryDB(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Recurring entry not found" });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating recurring entry:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/api/recurring-entries/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = "DELETE FROM recurring_entries WHERE id = $1 RETURNING *";
+    const result = await queryDB(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Recurring entry not found" });
+    }
+    res.json({ message: "Recurring entry deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting recurring entry:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/employee/:code", async (req, res) => {
+  const { code } = req.params;
+  const ip = getClientIp(req);
+
+  // Check lockout status
+  const { isLockedOut, remainingLockout } = handleLockout(ip);
+
+  if (isLockedOut) {
+    return res.status(403).send({
+      error: `Too many failed attempts. Try again in ${Math.ceil(
+        remainingLockout / 1000
+      )} second(s).`,
+    });
+  }
+
+  if (!code || code.length !== 4) {
+    return res.status(400).send("A valid 4-digit code is required");
+  }
+
+  try {
+    // Fetch the employee details
+    const employeeQuery = `
+      SELECT * FROM employees WHERE code = $1
+    `;
+    const employeeResult = await queryDB(employeeQuery, [code]);
+
+    if (employeeResult.rows.length === 0) {
+      return res.status(401).send({ error: "Invalid code" });
+    }
+
+    const employee = employeeResult.rows[0];
+
+    // Use Postgres to calculate the start and end of the current week in the database's timezone.
+    // The start of the week is calculated as:
+    //   date_trunc('day', now() - (EXTRACT(ISODOW FROM now())::int - 1) * interval '1 day')
+    // which yields Monday at midnight.
+    // The end is defined as the moment just before the next Monday:
+    //   start_of_week + interval '7 days'
+    const clockEntriesQuery = `
+      SELECT *
+      FROM clock_entries
+      WHERE employee_id = $1
+        AND clock_in >= date_trunc('day', now() - (EXTRACT(ISODOW FROM now())::int - 1) * interval '1 day')
+        AND clock_in < date_trunc('day', now() - (EXTRACT(ISODOW FROM now())::int - 1) * interval '1 day') + interval '7 days'
+      ORDER BY clock_in ASC
+    `;
+    const clockEntriesResult = await queryDB(clockEntriesQuery, [employee.id]);
+
+    const clockEntries = clockEntriesResult.rows;
+
+    // Clear login attempts
+    resetLockout(ip);
+
+    // Generate a JWT for the authenticated user
+    const token = jwt.sign(
+      { name: employee.id },
+      process.env.JWT_SECRET || "default-jwt-secret", // Use environment variable
+      { expiresIn: "24h" }
+    );
+
+    res.send({
+      ...employee,
+      token,
+      clockEntries,
+    });
+  } catch (error) {
+    console.error("Error signing in employee:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+});
+
+//check token
+app.use("/api/", (req, res, next) => {
+  // Get the token from the header
+  const token = req.headers.authorization?.split(" ")[1]; // Assuming the header format is: "Authorization: Bearer YOUR_TOKEN"
+  if (!token) {
+    return res.status(403).send({ error: "No token provided." });
+  }
+
+  // Verify the token
+  jwt.verify(token, process.env.JWT_SECRET || "default-jwt-secret", (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ error: "Failed to authenticate token." });
+    }
+    // If successful, proceed to the next middleware
+    //req.decoded = decoded;  // Optional: Save the decoded info for use in other routes
+    next();
+  });
+});
+
+// Endpoint to get all employees
+app.get("/api/employees", async (req, res) => {
+  try {
+    const query = "SELECT * FROM employees ORDER BY id ASC";
+    const result = await queryDB(query);
+    res.send(result.rows);
+  } catch (error) {
+    console.error("Error fetching employees:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+});
+
+//endpoint to activate an employee
+app.put("/api/employee/:id/activate", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const query = "UPDATE employees SET active = true WHERE id = $1";
+    const result = await queryDB(query, [id]);
+    res.send(result.rows);
+  } catch (error) {
+    console.error("Error activating employee:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+});
+
+// Endpoint to update an employee
+app.put("/api/employee/:id", async (req, res) => {
+  const { id } = req.params;
+  const updatedEmployee = req.body;
+
+  // Define the fields that can be updated
+  const allowedFields = [
+    "firstname",
+    "lastname",
+    "middlename",
+    "nickname",
+    "code",
+    "admin",
+    "manager",
+    "fooddiscount",
+    "discount",
+    "position",
+    "rate",
+    "active",
+    "email",
+  ];
+
+  // Build the SET clause dynamically
+  const fields = [];
+  const values = [];
+  let index = 1;
+
+  for (const key of allowedFields) {
+    // eslint-disable-next-line no-prototype-builtins
+    if (updatedEmployee.hasOwnProperty(key)) {
+      fields.push(`"${key}" = $${index}`);
+      values.push(updatedEmployee[key]);
+      index += 1;
+    }
+  }
+
+  if (fields.length === 0) {
+    return res
+      .status(400)
+      .send({ error: "No valid fields provided for update" });
+  }
+
+  try {
+    const query = `UPDATE employees SET ${fields.join(
+      ", "
+    )} WHERE id = $${index} RETURNING *`;
+    values.push(id);
+    const result = await queryDB(query, values);
+
+    if (result.rowCount === 0) {
+      return res.status(404).send({ error: "Employee not found" });
+    }
+
+    res.send(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating employee:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+});
+
+//create a new employee
+app.post("/api/employee", async (req, res) => {
+  const newEmployee = req.body;
+  try {
+    const query = `
+      INSERT INTO employees (firstname, lastname, middlename, nickname, code, kitchen, position, rate, email)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *;
+    `;
+    const values = [
+      newEmployee.firstname,
+      newEmployee.lastname,
+      newEmployee.middlename,
+      newEmployee.nickname,
+      newEmployee.code,
+      newEmployee.kitchen,
+      newEmployee.position,
+      newEmployee.rate,
+      newEmployee.email,
+    ];
+    const result = await queryDB(query, values);
+    res.status(201).send(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating employee:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+});
+
+// Clock In
+app.post("/api/employee/:id/clock", async (req: Request, res: Response) => {
+  const { id } = req.params;
+  let { clock_in, clock_out } = req.body;
+
+  // Validate clock_in
+  if (!clock_in) {
+    clock_in = new Date().toISOString(); // Generate current timestamp in ISO format
+  }
+
+  try {
+    // Insert into the database with optional clock_out
+    const query = `
+      INSERT INTO clock_entries (employee_id, clock_in, clock_out)
+      VALUES ($1, $2, $3)
+      RETURNING id, clock_in, clock_out
+    `;
+    const result = await queryDB(query, [
+      id,
+      clock_in,
+      clock_out ? clock_out : null,
+    ]);
+
+    return res.status(201).send({
+      message: "Clock entry created successfully.",
+      entry: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Error adding clock entry:", error);
+    res.status(500).send({ error: "Server error." });
+  }
+});
+
+// Clock out or edit clock entry
+app.patch(
+  "/api/employee/clock/:clockEntryId",
+  async (req: Request, res: Response) => {
+    const { clockEntryId } = req.params;
+    let { clock_in, clock_out } = req.body;
+
+    if (!clock_in && !clock_out) {
+      clock_out = new Date().toISOString(); // Generate current timestamp in ISO format
+    }
+
+    try {
+      // Build the dynamic query for updating clock entries
+      const updates = [];
+      const values = [];
+
+      if (clock_in) {
+        updates.push(`clock_in = $${updates.length + 1}::timestamptz`);
+        values.push(clock_in); // Ensure clock_in is formatted as a timestamp string
+      }
+      if (clock_out) {
+        updates.push(`clock_out = $${updates.length + 1}::timestamptz`);
+        values.push(clock_out); // Ensure clock_out is formatted as a timestamp string
+      }
+
+      // Add the clock entry ID as the last parameter
+      values.push(clockEntryId);
+
+      const query = `
+      UPDATE clock_entries
+      SET ${updates.join(", ")}, updated_at = NOW()
+      WHERE id = $${values.length}
+      RETURNING id, clock_in, clock_out
+    `;
+
+      const result = await queryDB(query, values);
+
+      if (result.rows.length === 0) {
+        return res.status(404).send({ error: "Clock entry not found." });
+      }
+
+      return res.status(200).send({
+        message: "Clock entry updated successfully.",
+        entry: result.rows[0],
+      });
+    } catch (error) {
+      console.error("Error updating clock entry:", error);
+      res.status(500).send({ error: "Server error." });
+    }
+  }
+);
+
+app.get("/api/clock-entries", async (req: Request, res: Response) => {
+  try {
+    const { start, end, employee_id } = req.query;
+
+    // Validate date params
+    if (!start || !end) {
+      return res
+        .status(400)
+        .send({ error: "Both 'start' and 'end' query params are required." });
+    }
+
+    // Instead of converting dates to ISO strings in JS (which converts them to UTC),
+    // we pass the provided date strings directly so that Postgres will interpret them
+    // according to the database server's timezone.
+    const startDate = start as string;
+    const endDate = end as string;
+
+    // Base query with JOIN to get the employee's first and last name.
+    // We cast the query parameters using ::timestamp.
+    // Since clock_entries.clock_in/clock_out are of type timestamptz,
+    // Postgres will convert the provided timestamp to a timestamptz using the session timezone.
+    let query = `
+      SELECT 
+        ce.id as clock_entry_id,
+        ce.employee_id,
+        ce.clock_in,
+        ce.clock_out,
+        ce.created_at,
+        ce.updated_at,
+        e.firstname,
+        e.lastname,
+        e.email
+      FROM clock_entries ce
+      JOIN employees e ON ce.employee_id = e.id
+      WHERE (
+          (ce.clock_in BETWEEN $1::timestamp AND $2::timestamp)
+          OR (ce.clock_out BETWEEN $1::timestamp AND $2::timestamp)
+          OR (ce.clock_in <= $1::timestamp AND ce.clock_out >= $2::timestamp)
+        )
+    `;
+    const values: (string | number)[] = [startDate, endDate];
+
+    // Optionally filter by employee_id if provided.
+    if (employee_id) {
+      query += ` AND ce.employee_id = $3 `;
+      values.push(Number(employee_id));
+    }
+
+    // Sort by clock_in ascending for chronological order.
+    query += ` ORDER BY ce.clock_in ASC `;
+
+    const result = await queryDB(query, values);
+    return res.status(200).send(result.rows);
+  } catch (error) {
+    console.error("Error fetching clock entries:", error);
+    return res
+      .status(500)
+      .send({ error: "Server error fetching clock entries." });
+  }
+});
+
+app.delete("/api/clock-entries/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query(
+      "DELETE FROM clock_entries WHERE id = $1 RETURNING *",
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).send({ message: "Clock entry not found" });
+    }
+
+    res.json({ message: "Clock entry deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting clock entry:", error);
+    res.status(500).json({ message: "Error deleting clock entry" });
+  }
+});
+
+app.post("/api/fetch-transactions", async (req, res) => {
+  const { emails, startDate, endDate } = req.body; // Expecting an array of emails
+
+  if (!Array.isArray(emails) || emails.length === 0) {
+    return res.status(400).send("Emails must be a non-empty array.");
+  }
+
+  // Build query string for emails and date range
+  let emailQuery = emails.map((email) => `email:${email}`).join(" OR ");
+  let query = `(${emailQuery})`; // Group email conditions
+
+  if (startDate) {
+    query += ` created_at:>=${startDate}`;
+  }
+  if (endDate) {
+    query += ` created_at:<=${endDate}`;
+  }
+
+  // GraphQL query now includes pagination via "after" and pageInfo
+  const graphqlQuery = `
+    query GetTransactions($query: String!, $after: String) {
+      orders(first: 50, query: $query, after: $after) {
+        edges {
+          cursor
+          node {
+            id
+            email
+            createdAt
+            transactions(first: 10) {
+              amountSet {
+                presentmentMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              gateway
+              status
+              kind
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+        }
+      }
+    }
+  `;
+
+  try {
+    let allTransactions = [];
+    let after = null;
+    let hasNextPage = true;
+
+    // Loop to fetch all pages of orders
+    while (hasNextPage) {
+      const response = await fetch(
+        "https://zdts-amusement-park.myshopify.com/admin/api/graphql.json",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": shopifyToken,
+          },
+          body: JSON.stringify({
+            query: graphqlQuery,
+            variables: { query, after },
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.errors) {
+        console.error("GraphQL Errors:", data.errors);
+        return res.status(400).json({ errors: data.errors });
+      }
+
+      const ordersData = data?.data?.orders;
+      const orders = ordersData?.edges || [];
+
+      // Extract transactions for the current page
+      const transactions = orders.flatMap((edge) =>
+        edge.node.transactions.map((transaction) => ({
+          ...transaction,
+          orderId: edge.node.id,
+          email: edge.node.email,
+          createdAt: edge.node.createdAt, // Order creation date
+        }))
+      );
+
+      allTransactions = allTransactions.concat(transactions);
+
+      // Check if there is another page and update the cursor for pagination
+      hasNextPage = ordersData?.pageInfo?.hasNextPage;
+      if (hasNextPage && orders.length > 0) {
+        after = orders[orders.length - 1].cursor;
+      }
+    }
+
+    res.json(allTransactions);
+  } catch (error) {
+    console.error("Error fetching transactions:", error);
+    res.status(500).send("Error fetching transactions");
+  }
+});
+
+app.get("/api/transactions/unsettled", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM transactions
+      WHERE settled_on IS NULL AND (kind = 'capture' OR kind = 'sale' OR kind = 'refund' OR kind = 'change');
+    `;
+    const { rows } = await queryDB(query);
+    const processedRows = rows.map((row) => ({
+      ...row,
+      amount:
+        row.kind === "refund" || row.kind === "change"
+          ? -Math.abs(row.amount)
+          : row.amount,
+    }));
+    res.json(processedRows);
+  } catch (error) {
+    console.error("Error fetching unsettled transactions:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get("/api/items/unsettled", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM line_item_sales
+      WHERE settled_on IS NULL;
+    `;
+    const { rows } = await queryDB(query);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error fetching unsettled items:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.post("/api/transactions/settle", async (req, res) => {
+  try {
+    const { transactionIds } = req.body; // Expecting an array of transaction IDs
+    if (!transactionIds || !transactionIds.length) {
+      return res.status(200).send("No transaction IDs provided");
+    }
+
+    const now = new Date();
+    const query = `
+      UPDATE transactions
+      SET settled_on = $1
+      WHERE id = ANY($2::bigint[])
+      RETURNING *;
+    `;
+    const { rows } = await queryDB(query, [now, transactionIds]);
+    res.json(rows);
+  } catch (error) {
+    console.error("Error updating settlement date:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.post("/api/items/settle", async (req, res) => {
+  try {
+    const { itemIds } = req.body; // Expecting an array of transaction IDs
+    if (!itemIds || !itemIds.length) {
+      return res.status(200).send("No item IDs provided");
+    }
+
+    const now = new Date();
+    const query = `
+      UPDATE line_item_sales
+      SET settled_on = $1
+      WHERE id = ANY($2::bigint[])
+      RETURNING *;
+    `;
+    const { rows } = await queryDB(query, [now, itemIds]);
+    res.json(rows);
+  } catch (error) {
+    console.error("Error updating settlement date:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get("/api/get-plu-items", async (req: Request, res: Response) => {
+  try {
+    const groupNumber = req.query.group;
+    let query = "SELECT * FROM plu_list";
+    if (groupNumber) {
+      query += ` WHERE "group_" = ${groupNumber}`;
+    }
+    query += " LIMIT 25";
+    const result = await queryDB(query);
+    console.log(result);
+    const pluItems = result.rows.map((row) => {
+      // Keep all original columns from the database
+      const item = { ...row };
+      // Add/override specific values that need to be explicit
+      item.quantity = 1;
+      item.price = row.original_unit_price;
+      item.id = row.id;
+      return item;
+    });
+    console.log(pluItems);
+    res.json(pluItems);
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while fetching products" });
+  }
+});
+
+// Endpoint to modify a PLU item
+app.put("/api/modify-plu-item", async (req: Request, res: Response) => {
+  try {
+    // Destructure the id and the rest of the fields to update from the request body
+    const { id, ...fieldsToUpdate } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing PLU item ID" });
+    }
+    // Build the UPDATE query dynamically based on provided fields
+    let query = "UPDATE plu_list SET ";
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let index = 1;
+
+    // Loop through the fields and add them as parameterized clauses
+    for (const key in fieldsToUpdate) {
+      // Only update if the field exists in the request body
+      setClauses.push(`"${key}" = $${index}`);
+      values.push(fieldsToUpdate[key]);
+      index++;
+    }
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: "No fields provided to update" });
+    }
+    query += setClauses.join(", ");
+    // Add a WHERE clause to target the specific PLU item by its id
+    query += ` WHERE id = $${index} RETURNING *`;
+    values.push(id);
+
+    // Execute the query (assuming queryDB is your helper for executing parameterized queries)
+    const result = await queryDB(query, values);
+    if (result.rows.length > 0) {
+      res.json(result.rows[0]);
+    } else {
+      res.status(404).json({ error: "PLU item not found" });
+    }
+  } catch (error) {
+    console.error("Error modifying PLU item:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while modifying the PLU item" });
+  }
+});
+
+//update plu item color by id
+app.put(
+  "/api/update-plu-item-color/:id",
+  async (req: Request, res: Response) => {
+    const { id, color } = req.body;
+    try {
+      const result = await queryDB(
+        "UPDATE plu_list SET color = $1 WHERE id = $2",
+        [color, id]
+      );
+      res.json(result);
+    } catch (error) {
+      console.error("Error updating plu item color:", error);
+      res.status(500).send("Server error");
+    }
+  }
+);
+
+app.get("/api/get-pos-by-tab/:tab?", async (req: Request, res: Response) => {
+  const { tab } = req.params;
+  //const folderPath = path.join(__dirname, 'posTabs'); // Use an absolute path for the folder
+
+  // Ensure the folder exists
+  /*if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }*/
+
+  try {
+    const query = `
+      SELECT pos_tabs.*, plu_list.*
+      FROM pos_tabs
+      LEFT JOIN plu_list ON pos_tabs.plu_id = plu_list.id
+      ${tab ? `WHERE pos_tabs.tab_id = $1` : ``}
+      ORDER BY pos_tabs.position ASC
+    `;
+    const result = await queryDB(query, tab ? [tab] : []);
+    const posTabs = result.rows.map((row) => {
+      // Keep all original columns from both tables
+      const item = { ...row };
+      // Add/override specific values that need to be explicit or renamed
+      return {
+        ...item,
+        sku: String(row.id),
+        price: row.original_unit_price,
+        quantity: 1,
+        modClass: row.mod_class || 0,
+        numOfMods: row.num_of_mods_req || 0,
+        group: row.group_ || 0,
+        vendor: row.category || "admission",
+        fullPrice: row.original_unit_price || 0,
+        discountType: row.discount_type,
+        addPrice: row.add_price,
+        id: row.line_item_id,
+      };
+    });
+
+    // Save successful results to a local JSON file
+    //const jsonResult = JSON.stringify(posTabs);
+    //const fileName = tab ? `posTabs_${tab}.json` : 'posTabs_default.json';
+    //const filePath = path.join(folderPath, fileName);
+    //fs.writeFileSync(filePath, jsonResult);
+
+    res.json(posTabs);
+  } catch (error) {
+    console.error("Error fetching POS tabs:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while fetching POS tabs" });
+    /*
+    // If local JSON file exists, return the last known successful results
+    const fileName = tab ? `posTabs_${tab}.json` : 'posTabs_default.json';
+    const filePath = path.join(folderPath, fileName);
+    if (fs.existsSync(filePath)) {
+      const jsonFile = fs.readFileSync(filePath, 'utf8');
+      const lastKnownResults = JSON.parse(jsonFile);
+      res.json(lastKnownResults);
+    } else {
+      res.status(500).json({ error: 'An error occurred while fetching POS tabs' });
+    }
+    */
+  }
+});
+
+app.post("/api/create-barcode", async (req: Request, res: Response) => {
+  console.log("creating barcode:", req.body);
+  try {
+    const { barcode, plu_id } = req.body;
+
+    if (!barcode || !plu_id) {
+      return res.status(400).send("Barcode and PLU ID are required.");
+    }
+
+    const query = `
+          INSERT INTO barcodes (barcode, plu_id)
+          VALUES ($1, $2)
+          RETURNING *;
+      `;
+    const values = [barcode, plu_id];
+
+    const result = await queryDB(query, values);
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating barcode:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get(
+  "/api/search-by-barcode/:barcode",
+  async (req: Request, res: Response) => {
+    const { barcode } = req.params;
+
+    if (!barcode) {
+      return res.status(400).send("Barcode is required.");
+    }
+
+    try {
+      //console.log(`[DB] Attempting to search barcode: ${barcode}`);
+      const query = `
+          SELECT b.barcode, p.*
+          FROM barcodes b
+          JOIN plu_list p ON b.plu_id = p.id
+          WHERE b.barcode = $1;
+      `;
+      const values = [barcode];
+
+      //console.log(`[DB] Executing query with values:`, values);
+      const result = await queryDB(query, values);
+      //console.log(`[DB] Query result rows:`, result?.rows?.length || 0);
+
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        // Keep all original columns from both tables
+        const item = { ...row };
+        // Add/override specific values that need to be explicit or renamed
+        return res.json({
+          ...item,
+          sku: String(row.id),
+          price: row.original_unit_price || 0,
+          quantity: 1,
+          modClass: row.mod_class || 0,
+          numOfMods: row.num_of_mods_req || 0,
+          group: row.group_ || 0,
+          fullPrice: row.original_unit_price || 0,
+          discountType: row.discount_type || null,
+          addPrice: row.add_price || 0,
+          id: row.line_item_id || null,
+        });
+      } else {
+        //(`[DB] No results found for barcode: ${barcode}`);
+        res.status(204).json();
+      }
+    } catch (error) {
+      console.error("[DB] Database error details:", {
+        message: error.message,
+        code: error.code,
+        stack: error.stack,
+      });
+      res.status(500).json({
+        error: "An error occurred while searching",
+        details: error.message,
+        code: error.code,
+      });
+    }
+  }
+);
+
+app.get("/api/search-memberships", async (req, res) => {
+  try {
+    const { name = "kdjvnsdkjbnvfs", barcode } = req.query;
+
+    let query =
+      "SELECT membership_number, name, membership_type, sub_id FROM memberships WHERE ";
+    const queryParams = [];
+
+    // Constructing the query based on the provided parameters
+    if (name) {
+      query += "name ILIKE $1::text";
+      queryParams.push(`%${name}%`);
+    }
+
+    if (barcode) {
+      if (name) query += " OR ";
+      query +=
+        "barcode = $2::text OR sub_id = $2::text OR membership_number = $2::integer"; // or ::integer, depending on the actual type of the barcode column
+      queryParams.push(barcode);
+    }
+
+    query += " ORDER BY membership_number DESC LIMIT 16"; // Add the ORDER BY and LIMIT clauses
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+// Assuming you're using Express.js and have a function `queryDB` to execute SQL queries
+
+app.get("/api/members", async (req, res) => {
+  try {
+    const { name } = req.query as { name: string };
+    let query = "SELECT * FROM memberships";
+    const values = [];
+
+    if (name) {
+      query += " WHERE LOWER(name) LIKE $1";
+      values.push(`%${name.toLowerCase()}%`);
+    }
+
+    query += " ORDER BY membership_number DESC;";
+
+    const { rows } = await queryDB(query, values);
+    res.status(200).json(rows);
+  } catch (err) {
+    console.error("Error fetching members:", err);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.put("/api/member/:membership_number", async (req, res) => {
+  try {
+    const membershipNumber = parseInt(req.params.membership_number, 10);
+
+    if (isNaN(membershipNumber)) {
+      return res.status(400).send("Invalid membership number");
+    }
+
+    const {
+      name,
+      membership_type,
+      status,
+      term,
+      due_date,
+      contract_end_date,
+      contract_start_date,
+      signup_date,
+      visits,
+      dob,
+      age,
+      last_visit,
+      address_line_1,
+      city_state_zip,
+      comment,
+      alert,
+      note,
+      email,
+      responsible_member,
+      barcode,
+      contact,
+      valid_until,
+      sub_id,
+      customer_id,
+      _seal_selling_plan_id,
+      former_sub_id,
+      total_paid,
+      paid_per_visit,
+      payments_remaining,
+      valid_starting,
+    } = req.body;
+
+    // Build the update query dynamically
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    const addField = (fieldName, fieldValue) => {
+      if (fieldValue !== undefined) {
+        fields.push(`${fieldName} = $${idx}`);
+        values.push(fieldValue);
+        idx++;
+      }
+    };
+
+    addField("name", name);
+    addField("membership_type", membership_type);
+    addField("status", status);
+    addField("term", term);
+    addField("due_date", due_date);
+    addField("contract_end_date", contract_end_date);
+    addField("contract_start_date", contract_start_date);
+    addField("signup_date", signup_date);
+    addField("visits", visits);
+    addField("dob", dob);
+    addField("age", age);
+    addField("last_visit", last_visit);
+    addField("address_line_1", address_line_1);
+    addField("city_state_zip", city_state_zip);
+    addField("comment", comment);
+    addField("alert", alert);
+    addField("note", note);
+    addField("email", email);
+    addField("responsible_member", responsible_member);
+    addField("barcode", barcode);
+    addField("contact", contact);
+    addField("valid_until", valid_until);
+    addField("sub_id", sub_id);
+    addField("customer_id", customer_id);
+    addField("_seal_selling_plan_id", _seal_selling_plan_id);
+    addField("former_sub_id", former_sub_id);
+    addField("total_paid", total_paid);
+    addField("paid_per_visit", paid_per_visit);
+    addField("payments_remaining", payments_remaining);
+    addField("valid_starting", valid_starting);
+
+    if (fields.length === 0) {
+      return res.status(400).send("No fields to update");
+    }
+
+    const query = `
+      UPDATE memberships
+      SET ${fields.join(", ")}
+      WHERE membership_number = $${idx}
+      RETURNING *;
+    `;
+    values.push(membershipNumber);
+
+    const { rows } = await queryDB(query, values);
+
+    if (rows.length === 0) {
+      return res.status(404).send("Member not found");
+    }
+
+    res.status(200).json(rows[0]);
+  } catch (err) {
+    console.error("Error updating member:", err);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/memberships-details", async (req, res) => {
+  try {
+    const { name, barcode, email } = req.query;
+
+    let membership_number;
+    //check if barcode fits in integer limit for postgres (	-2147483648 to 2147483647)
+    if (barcode) {
+      const parsedBarcode = parseInt(barcode.toString(), 10);
+      if (
+        isNaN(parsedBarcode) ||
+        parsedBarcode < -2147483648 ||
+        parsedBarcode > 2147483647
+      ) {
+        membership_number = null;
+      } else {
+        membership_number = parsedBarcode;
+      }
+    }
+
+    let query = "SELECT * FROM memberships WHERE ";
+    const queryParams = [];
+
+    // Constructing the query based on the provided parameters
+    if (name) {
+      query += "name ILIKE $1::text";
+      queryParams.push(`%${name}%`);
+    } else if (barcode) {
+      query += "name ILIKE $1::text";
+      queryParams.push(`%${barcode}%`);
+    } else {
+      query += "name ILIKE $1::text";
+      queryParams.push(`%kjdsngsdjkgnsdf%`);
+    }
+
+    if (barcode) {
+      query += " OR ";
+      query += "barcode = $2::text OR sub_id = $2::text";
+      queryParams.push(barcode);
+    } else if (email) {
+      query += " OR ";
+      query += "email = $2::text";
+      queryParams.push(email);
+    } else if (name) {
+      query += " OR ";
+      query += "barcode = $2::text"; // or ::integer, depending on the actual type of the barcode column
+      queryParams.push(name);
+    }
+
+    if (membership_number) {
+      query += " OR ";
+      query += "membership_number = $3::integer";
+      queryParams.push(membership_number);
+    }
+
+    query += " ORDER BY membership_number DESC LIMIT 16"; // Add the ORDER BY and LIMIT clauses
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/member-photo", async (req, res) => {
+  try {
+    const { membership_number } = req.query;
+    const formattedMembershipNumber = membership_number
+      .toString()
+      .padStart(6, "0");
+    const photoFileName = formattedMembershipNumber + ".jpg";
+    const folderId = "1-3AFqiWjeNXlcZ1ajYElZD4XkLj3vslK";
+
+    // Query for files with the specified name within the folder
+    const query = `'${folderId}' in parents and name = '${photoFileName}' and trashed = false`;
+
+    const photo = await drive.files.list({
+      q: query,
+      fields: "files(id, name, webContentLink)",
+    });
+
+    // If the file is found, send its details, else send a not found message
+    if (photo.data.files.length > 0) {
+      res.json(photo.data.files[0]);
+    } else {
+      res.status(404).send("Photo not found");
+    }
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/get-member-photo", async (req, res) => {
+  try {
+    const { membership_number } = req.query;
+    const formattedMembershipNumber = membership_number
+      .toString()
+      .padStart(6, "0");
+    const photoFileName = formattedMembershipNumber + ".jpg";
+    const folderId = "1-3AFqiWjeNXlcZ1ajYElZD4XkLj3vslK";
+
+    // Query for files with the specified name within the folder
+    const query = `'${folderId}' in parents and name = '${photoFileName}' and trashed = false`;
+
+    const photo = await drive.files.list({
+      q: query,
+      fields: "files(id, name)",
+    });
+
+    // If the file is found, get and send the photo
+    if (photo.data.files.length > 0) {
+      const fileId = photo.data.files[0].id;
+
+      // Get the photo as a stream
+      const photoStream = await drive.files.get(
+        {
+          fileId: fileId,
+          alt: "media",
+        },
+        { responseType: "stream" }
+      );
+
+      res.setHeader("Content-Type", "image/jpeg"); // Set the content type to image/jpeg
+      photoStream.data.pipe(res); // Pipe the photo stream directly to the response
+    } else {
+      res.status(404).send("Photo not found");
+    }
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post(
+  "/api/upload-member-photo",
+  upload.single("image"),
+  async (req: MulterRequest, res: Response) => {
+    try {
+      const { membership_number } = req.body;
+      const formattedMembershipNumber = membership_number
+        .toString()
+        .padStart(6, "0");
+      const photoFileName = `${formattedMembershipNumber}.jpg`;
+      const folderId = "1-3AFqiWjeNXlcZ1ajYElZD4XkLj3vslK";
+
+      // Convert buffer to stream
+      const bufferStream = new Readable();
+      bufferStream.push(req.file.buffer);
+      bufferStream.push(null); // Indicates the end of the stream
+
+      // Check if file exists
+      const response = await drive.files.list({
+        q: `name='${photoFileName}' and parents in '${folderId}' and trashed=false`,
+        spaces: "drive",
+        fields: "files(id, name)",
+      });
+
+      let file;
+      if (response.data.files.length > 0) {
+        // File exists, update it
+        const existingFileId = response.data.files[0].id;
+        file = await drive.files.update({
+          fileId: existingFileId,
+          media: {
+            mimeType: req.file.mimetype,
+            body: bufferStream,
+          },
+        });
+      } else {
+        // File does not exist, create it
+        file = await drive.files.create({
+          requestBody: {
+            name: photoFileName,
+            parents: [folderId],
+          },
+          media: {
+            mimeType: req.file.mimetype,
+            body: bufferStream,
+          },
+          fields: "id",
+        });
+      }
+
+      res
+        .status(200)
+        .send({ message: "File uploaded successfully", fileId: file.data.id });
+    } catch (error) {
+      console.error(error.message);
+      res.status(500).send("Server Error");
+    }
+  }
+);
+
+app.post("/api/create-member", async (req, res) => {
+  try {
+    const { name, membership_type, dob, sub_id, barcode } = req.body;
+
+    // Construct the INSERT query
+    const query = `
+      INSERT INTO memberships (name, membership_type, dob, sub_id, barcode)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *;`; // List all other fields in both the VALUES and columns list
+    const queryParams = [
+      name || null,
+      membership_type || null,
+      dob || null,
+      sub_id || null,
+      barcode || null,
+    ];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows[0]); // Return the newly created member
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/edit-member", async (req, res) => {
+  try {
+    const {
+      alert,
+      valid_until,
+      name,
+      membership_type,
+      dob,
+      sub_id,
+      barcode,
+      membership_number,
+    } = req.body;
+
+    // Construct the UPDATE query
+    const query = `
+      UPDATE memberships
+      SET name = $1, membership_type = $2, dob = $3, sub_id = $4, barcode = $5, valid_until = $7, alert = $8
+      WHERE membership_number = $6
+      RETURNING *;`; // Update the fields and use the WHERE clause to specify the member to update
+    const queryParams = [
+      name || null,
+      membership_type || null,
+      dob || null,
+      sub_id || null,
+      barcode || null,
+      membership_number || null,
+      valid_until || null,
+      alert || null,
+    ];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    if (rows.length === 0) {
+      return res.status(404).send("Member not found");
+    }
+    res.status(200).json(rows[0]); // Return the updated member
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/checkin", async (req, res) => {
+  try {
+    const { membership_number, visit_timestamp } = req.body;
+    // Construct the UPDATE query
+    const query = `
+      INSERT INTO visits (membership_number,visit_timestamp)
+      VALUES ($1, $2)
+      RETURNING *;`; // Update the fields and use the WHERE clause to specify the member to update
+    const queryParams = [membership_number, visit_timestamp];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows[0]); // Return the checkin
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/delete-recent-checkin", async (req, res) => {
+  try {
+    const { membership_number } = req.body;
+
+    // Construct the DELETE query to remove the most recent check-in
+    const query = `
+      DELETE FROM visits
+      WHERE membership_number = $1
+      AND visit_timestamp = (
+          SELECT MAX(visit_timestamp)
+          FROM visits
+          WHERE membership_number = $1
+      )
+      RETURNING *;
+      `;
+
+    const queryParams = [membership_number];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+
+    // Check if a check-in was found and deleted
+    if (rows.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "No check-ins found for this member" });
+    }
+
+    // Return the deleted check-in details
+    res.status(200).json(rows[0]);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+// Assuming you're using Express.js and have a function `queryDB` to execute SQL queries
+
+app.delete("/api/visit/:id", async (req, res) => {
+  try {
+    const visitId = parseInt(req.params.id, 10);
+    if (isNaN(visitId)) {
+      return res.status(400).send("Invalid visit ID");
+    }
+
+    // Optional: Add authentication and authorization checks here
+    // For example:
+    // if (!req.user || !req.user.isAdmin) {
+    //   return res.status(403).send('Forbidden');
+    // }
+
+    const query = "DELETE FROM visits WHERE id = $1 RETURNING *;";
+    const { rows } = await queryDB(query, [visitId]);
+
+    if (rows.length === 0) {
+      return res.status(404).send("Visit not found");
+    }
+
+    res.status(200).json({ message: "Visit deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting visit:", err);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/get-visits", async (req, res) => {
+  try {
+    // Get the membership numbers from the query parameter
+    let membershipNumbersArray: string[] = [];
+
+    // Check if membership_numbers is a string and split it, otherwise handle appropriately
+    if (typeof req.query.membership_numbers === "string") {
+      membershipNumbersArray = req.query.membership_numbers.split(",");
+    }
+
+    // Construct the SELECT query to get visits for multiple membership numbers
+    const query = `
+      SELECT * FROM visits
+      WHERE membership_number = ANY($1::int[])
+      ORDER BY visit_timestamp DESC;
+    `;
+    const queryParams = [membershipNumbersArray];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(200).json(rows); // Return all visits for the membership numbers
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/add-attendance", async (req, res) => {
+  try {
+    const { category, quantity, order_number, date } = req.body;
+    // Construct the UPDATE query
+    const query = `
+      INSERT INTO attendance (category,quantity,order_number,date)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *;`; // Update the fields and use the WHERE clause to specify the member to update
+    const queryParams = [category, quantity, order_number, date];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows[0]); // Return the checkin
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/get-attendance", async (req, res) => {
+  try {
+    const { date } = req.body;
+    // Construct the UPDATE query
+    const query = `
+      SELECT * FROM attendance
+      WHERE date = $1
+      `; // Update the fields and use the WHERE clause to specify the member to update
+    const queryParams = [date];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows); // Return the checkin
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/cancel-attendance", async (req, res) => {
+  try {
+    const { order_number } = req.body;
+
+    // Construct the UPDATE queries for both tables
+    const attendanceQuery = `
+      UPDATE attendance
+      SET cancelled = true
+      WHERE order_number = $1
+      RETURNING *;
+    `;
+    const calendarQuery = `
+      UPDATE calendar
+      SET cancelled = true
+      WHERE order_number = $1
+      RETURNING *;
+    `;
+    const queryParams = [order_number];
+
+    // Execute both queries
+    const attendanceResult = await queryDB(attendanceQuery, queryParams);
+    const calendarResult = await queryDB(calendarQuery, queryParams);
+
+    const updatedAttendanceRecords = attendanceResult.rows;
+    const updatedCalendarRecords = calendarResult.rows;
+
+    if (
+      updatedAttendanceRecords.length === 0 &&
+      updatedCalendarRecords.length === 0
+    ) {
+      return res.status(204).json({
+        message: "No attendance records found for this order number in either table",
+      });
+    }
+
+    res.status(200).json({
+      message: "Attendance cancelled successfully in both tables",
+      updatedAttendanceRecords: updatedAttendanceRecords,
+      updatedCalendarRecords: updatedCalendarRecords,
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/add-calendar-attendance", async (req, res) => {
+  try {
+    const { category, quantity, order_number, date } = req.body;
+    // Construct the UPDATE query
+    const query = `
+      INSERT INTO calendar (category,quantity,order_number,date)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *;`; // Update the fields and use the WHERE clause to specify the member to update
+    const queryParams = [category, quantity, order_number, date];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows[0]); // Return the checkin
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/get-calendar-attendance", async (req, res) => {
+  try {
+    const { startDate, date } = req.body;
+
+    if (!date) {
+      return res.status(400).send("Date is required");
+    }
+
+    // Construct the SELECT query to get visits for the specified date range
+    const query = `
+      SELECT * FROM calendar
+      WHERE date >= $1 AND date <= $2
+      ORDER BY date ASC;
+    `;
+    const queryParams = [startDate || date, date];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(200).json(rows); // Return all visits for the specified date range
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/get-visits-by-date", async (req, res) => {
+  try {
+    // Get the date from the query parameter
+    const date = req.query.date as string;
+    const startingdate = req.query.startingdate as string;
+
+    if (!date) {
+      return res.status(400).send("Date is required");
+    }
+
+    // Format the date to ensure it covers the full day (00:00:00 to 23:59:59)
+    const startDate = new Date(startingdate || date);
+    startDate.setHours(0, 0, 0, 0);
+
+    const endDate = new Date(date);
+    endDate.setHours(23, 59, 59, 999);
+
+    // Construct the SELECT query to get visits for the specified date
+    const query = `
+      SELECT * FROM visits
+      WHERE visit_timestamp >= $1 AND visit_timestamp <= $2
+      ORDER BY visit_timestamp DESC;
+    `;
+    const queryParams = [startDate, endDate];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(200).json(rows); // Return all visits for the specified date
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/giftcards", async (req, res) => {
+  try {
+    const query = `
+      SELECT * FROM gift_cards
+      ORDER BY card_id DESC;
+    `;
+    const { rows } = await queryDB(query);
+    res.status(200).json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+// New endpoint that searches for gift cards associated with order numbers/order ids
+app.get("/api/giftcards/order", async (req, res) => {
+  try {
+    // Retrieve the order search strings from the query parameter "orderNumbers"
+    let orderNumbers = req.query.orderNumbers as ParsedQs[];
+    if (!orderNumbers) {
+      return res.status(400).json({ error: "No order numbers provided." });
+    }
+    // Ensure orderNumbers is always an array (wrap a single value in an array)
+    if (!Array.isArray(orderNumbers)) {
+      orderNumbers = [orderNumbers];
+    }
+
+    /* 
+      The SQL query uses PostgreSQL regex functions to extract the first numeric substring 
+      from the issued_to field. Then, for each search term provided:
+        - If the search term is "short" (< 11 characters), it matches gift_cards whose 
+          extracted numeric part is also short (< 11 characters) and starts with the search term.
+        - If the search term is "long" (>= 11 characters), it only matches if the extracted numeric 
+          part is long (>= 11 characters) and exactly equals the search term.
+      This logic helps distinguish between order numbers and order ids.
+    */
+    const query = `
+      SELECT * FROM gift_cards
+      WHERE EXISTS (
+        SELECT 1 FROM unnest($1::text[]) as search_term
+        WHERE (
+          (char_length(search_term) < 11
+            AND char_length(substring(gift_cards.issued_to from '(\\d+)')) < 11
+            AND left(substring(gift_cards.issued_to from '(\\d+)'), char_length(search_term)) = search_term)
+          OR
+          (char_length(search_term) >= 11
+            AND char_length(substring(gift_cards.issued_to from '(\\d+)')) >= 11
+            AND substring(gift_cards.issued_to from '(\\d+)') = search_term)
+        )
+      )
+      ORDER BY card_id DESC;
+    `;
+
+    // Execute the query passing the orderNumbers array as a parameter
+    const { rows } = await queryDB(query, [orderNumbers]);
+    res.status(200).json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/giftcards", async (req, res) => {
+  try {
+    const {
+      issued_to,
+      is_donation,
+      notes,
+      items,
+      card_numbers,
+      expiration,
+      valid_starting,
+    } = req.body;
+
+    if (
+      !card_numbers ||
+      !Array.isArray(card_numbers) ||
+      card_numbers.length === 0
+    ) {
+      return res.status(400).send("Invalid input data");
+    }
+
+    // Prepare the data for insertion
+    const giftCardsToInsert = card_numbers.map((card_number) => ({
+      card_number,
+      issued_to,
+      items,
+      is_donation,
+      notes,
+      expiration,
+      valid_starting,
+    }));
+
+    // Build the SQL query to insert multiple gift cards
+    const values = [];
+    const placeholders = [];
+
+    giftCardsToInsert.forEach((gc, index) => {
+      const idx = index * 7; // Adjusted index for 6 fields
+      values.push(
+        gc.card_number,
+        gc.issued_to,
+        gc.items,
+        gc.is_donation,
+        gc.notes,
+        gc.expiration,
+        gc.valid_starting
+      );
+      placeholders.push(
+        `($${idx + 1}, $${idx + 2}, $${idx + 3}, $${idx + 4}, $${idx + 5}, $${
+          idx + 6
+        }, $${idx + 7})`
+      );
+    });
+
+    const query = `
+      INSERT INTO gift_cards (card_number, issued_to, items, is_donation, notes, expiration, valid_starting)
+      VALUES ${placeholders.join(", ")}
+      RETURNING *;
+    `;
+
+    const { rows } = await queryDB(query, values);
+
+    res.status(201).json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.put("/api/giftcard/:card_id", async (req, res) => {
+  try {
+    const { card_id } = req.params;
+    const updatedData = req.body;
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [key, value] of Object.entries(updatedData)) {
+      fields.push(`${key} = $${idx}`);
+      values.push(value);
+      idx++;
+    }
+
+    const query = `
+      UPDATE gift_cards
+      SET ${fields.join(", ")}
+      WHERE card_id = $${idx}
+      RETURNING *;
+    `;
+    values.push(card_id);
+
+    const { rows } = await queryDB(query, values);
+    res.status(200).json(rows[0]);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+// Assuming you're using Express.js and have a function `queryDB` to execute SQL queries
+
+app.get("/api/visits", async (req, res) => {
+  try {
+    const dateParam = req.query.date as string; // Expected format: YYYY-MM-DD
+
+    if (!dateParam) {
+      return res.status(400).send("Date parameter is required");
+    }
+
+    // Validate the date format
+    const date = new Date(dateParam);
+    if (isNaN(date.getTime())) {
+      return res.status(400).send("Invalid date format");
+    }
+
+    const query = `
+      SELECT
+        v.membership_number,
+        v.visit_timestamp,
+        v.id AS visit_id,
+        m.name,
+        m.membership_type
+      FROM
+        visits v
+      JOIN
+        memberships m ON v.membership_number = m.membership_number
+      WHERE
+        DATE(v.visit_timestamp) = $1
+      ORDER BY
+        v.visit_timestamp DESC;
+    `;
+    const { rows } = await queryDB(query, [dateParam]);
+    res.status(200).json(rows);
+  } catch (err) {
+    console.error("Error fetching visits:", err);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.delete("/api/giftcard/:card_id", async (req, res) => {
+  try {
+    const { card_id } = req.params;
+
+    const query = `
+      DELETE FROM gift_cards
+      WHERE card_id = $1;
+    `;
+    await queryDB(query, [card_id]);
+    res.status(200).send("Gift card deleted successfully");
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/search-gift-cards", async (req, res) => {
+  try {
+    const card_number = req.query.card_number as string;
+
+    if (!card_number) {
+      return res.status(400).send("card_number is required!");
+    }
+
+    const query = `
+      SELECT * FROM gift_cards
+      WHERE card_number LIKE $1;
+    `;
+    const queryParams = [card_number];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(200).json(rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/get-gift-cards-by-date", async (req, res) => {
+  try {
+    // Get the date from the query parameter
+    const date = req.query.date as string;
+
+    if (!date) {
+      return res.status(400).send("Date is required");
+    }
+
+    // Format the date to ensure it covers the full day (00:00:00 to 23:59:59)
+    const startDate = new Date(date);
+    startDate.setHours(0, 0, 0, 0);
+
+    const endDate = new Date(date);
+    endDate.setHours(23, 59, 59, 999);
+
+    // Construct the SELECT query to get redeems for the specified date
+    const query = `
+      SELECT * FROM gift_cards
+      WHERE redeem_timestamp >= $1 AND redeem_timestamp <= $2
+      ORDER BY redeem_timestamp DESC;
+    `;
+    const queryParams = [startDate, endDate];
+
+    // Execute the query
+    const { rows } = await queryDB(query, queryParams);
+    res.status(200).json(rows); // Return all redeems for the specified date
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/redeem-gift-card", async (req, res) => {
+  try {
+    const { card_id, timestamp } = req.body;
+
+    if (!card_id || !timestamp) {
+      return res.status(400).send("card_id and timestamp are required!");
+    }
+
+    const query = `
+      UPDATE gift_cards
+      SET redeem_timestamp = $1
+      WHERE card_id = $2
+      RETURNING *;
+    `;
+    const queryParams = [timestamp, card_id];
+
+    // Execute the update query
+    const { rows } = await queryDB(query, queryParams);
+
+    // Check if the gift card was successfully updated
+    if (rows.length > 0) {
+      res.status(200).json(rows[0]); // Return the updated gift card record
+    } else {
+      res.status(404).send("Gift card not found");
+    }
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.post("/api/activate-gift-card", async (req, res) => {
+  try {
+    const {
+      items,
+      card_number,
+      is_donation,
+      issued_to,
+      notes,
+      expiration,
+      valid_starting,
+    } = req.body;
+    const timestamp = new Date().toLocaleString();
+
+    if (!card_number || !items) {
+      return res.status(400).send("Both card_number and items are required!");
+    }
+
+    const query = `
+      INSERT INTO gift_cards (card_number, items,issue_timestamp, is_donation, issued_to, notes, expiration, valid_starting)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *; 
+    `;
+    const queryParams = [
+      card_number,
+      items,
+      timestamp,
+      is_donation || false,
+      issued_to || null,
+      notes || null,
+      expiration || null,
+      valid_starting || null,
+    ];
+
+    const { rows } = await queryDB(query, queryParams);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
+app.get("/api/get-subscription-details/:subId", async (req, res) => {
+  const subId = req.params.subId; // Extract the subId from the request URL
+
+  fetch(
+    `https://app.sealsubscriptions.com/shopify/merchant/api/subscription?id=${subId}`,
+    {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Seal-Token": SEAL_TOKEN,
+      },
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => res.send(data))
+    .catch((error) => {
+      console.error(error);
+      res.status(500).send({ message: "Error fetching subscription details" });
+    });
+});
+
+app.get(
+  "/api/get-pos-mods/:modclasses",
+  async (req: Request, res: Response) => {
+    const { modclasses } = req.params as { modclasses: string };
+
+    try {
+      const modclassArray = modclasses
+        .split(",")
+        .map((cls) => parseInt(cls.trim(), 10))
+        .filter((cls) => !isNaN(cls));
+
+      const rangeQueries = modclassArray
+        .map(
+          (modclass, i) => `
+        SELECT *
+        FROM plu_list
+        WHERE mod_class BETWEEN $${i * 2 + 1} AND $${i * 2 + 2}
+      `
+        )
+        .join(" UNION ALL ");
+
+      const params = modclassArray.flatMap((modclass) => [
+        modclass * 1000,
+        (modclass + 1) * 1000 - 1,
+      ]);
+
+      const result = await queryDB(rangeQueries, params);
+
+      const groupedMods: Record<number, any[]> = {};
+
+      for (const row of result.rows) {
+        const group = Math.floor(row.mod_class / 1000); // <-- This is key
+
+        const item = {
+          ...row,
+          price: row.original_unit_price || 0,
+          numOfMods: row.num_of_mods_req || 0,
+          modClass: row.mod_class || 0,
+          discountType: row.discount_type || null,
+          isMod: true,
+          addPrice: row.add_price || 0,
+          sku: row.id || null,
+          id: row.line_item_id || null,
+        };
+
+        if (!groupedMods[group]) groupedMods[group] = [];
+        groupedMods[group].push(item);
+      }
+
+      Object.values(groupedMods).forEach((mods: any[]) =>
+        mods.sort((a, b) => a.title.localeCompare(b.title))
+      );
+
+      res.json(groupedMods);
+    } catch (error) {
+      console.error("Error fetching pos mods:", error);
+      res
+        .status(500)
+        .json({ error: "An error occurred while fetching pos mods" });
+    }
+  }
+);
+
+app.get("/api/get-mods", async (req, res) => {
+  try {
+    // Get the modClasses from the query string and split it into an array
+    const modClasses = req.query.modClasses as string;
+    if (!modClasses) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or missing modClasses parameter" });
+    }
+
+    // Convert the comma-separated string to an array of integers
+    const modClassIntegers = modClasses.split(",").map(Number);
+    //console.log(modClassIntegers); // For debugging purposes
+
+    // Construct the SQL query
+    const query = `
+      SELECT *
+      FROM plu_list
+      WHERE mod = ANY($1::int[])
+    `;
+
+    // Execute the query
+    const result = await queryDB(query, [modClassIntegers]);
+    const posTabs = result.rows.map((row) => {
+      // Keep all original columns from the database
+      const item = { ...row };
+      // Add/override specific values that need to be explicit or renamed
+      return {
+        ...item,
+        title: row.title || "",
+        price: row.original_unit_price || 0,
+        numOfMods: row.num_of_mods_req || 0,
+        mod: row.mod || null,
+        discountType: row.discount_type || null,
+        isMod: true,
+        addPrice: row.add_price || 0,
+        mod_type: row.mod_type || null,
+        id: row.line_item_id || null,
+        variant_id: row.variant_id || null,
+        function: row.function || null,
+        max_quantity: row.max_quantity || null,
+        max_modClass: row.max_modClass || null,
+        mod_class: row.mod_class || null,
+        color: row.color || null,
+      };
+    });
+
+    res.json(posTabs);
+  } catch (error) {
+    console.error("Error fetching mods:", error);
+    res.status(500).json({ error: "An error occurred while fetching mods" });
+  }
+});
+
+
+app.post("/create-portal-redirect/:customerId", async (req, res) => {
+  try {
+    const customerId = req.params.customerId;
+    console.log("trying for a portal...", customerId);
+    /*
+    // Get the customer's subscription
+    //const subscription = await stripe.subscriptions.retrieve(customerId);
+
+    // Calculate the difference between the subscription start date and the current date
+    const startDate = new Date(subscription.start_date * 1000);
+    const currentDate = new Date();
+    const timeDifference = Math.abs(currentDate.getTime() - startDate.getTime());
+    const daysDifference = Math.ceil(timeDifference / (1000 * 3600 * 24));
+
+    let cancelUrl;
+    if (daysDifference < 365) {
+      // If the subscription has not been active for a year, do not allow cancellation
+      cancelUrl = '';
+    } else {
+      // If the subscription has been active for at least a year, check for unpaid invoices
+      const invoices = await stripe.invoices.list({ customer: customerId, status: 'unpaid' });
+      for (const invoice of invoices.data) {
+        const invoiceDate = new Date(invoice.date * 1000);
+        if (invoiceDate < startDate) {
+          // If there is an unpaid invoice with a date before the one-year mark, do not allow cancellation
+          cancelUrl = '';
+          break;
+        }
+      }
+    }
+
+    if (!cancelUrl) {
+      // If cancellation is not allowed, set the cancel URL to an empty string
+      cancelUrl = '';
+    } else {
+      // If cancellation is allowed, set the cancel URL to the provided redirect URL
+      cancelUrl = redirectUrl;
+    }
+
+    // Update the customer's subscription portal settings
+    const customer = await stripe.customers.update(customerId, {
+      subscription_portal: {
+        return_url: redirectUrl,
+        cancel_url: cancelUrl
+      }
+    });
+*/
+    console.log(customerId);
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: "https://www.zdtamusement.com/account",
+    });
+
+    res.redirect(session.url);
+  } catch (error) {
+    res.send({ success: false, error });
+  }
+});
+
+app.post("/create-payment-intent", async (req, res) => {
+  const { amount, email, name, phone, address } = req.body;
+  // Alternatively, set up a webhook to listen for the payment_intent.succeeded event
+  // and attach the PaymentMethod to a new Customer
+  const customer = await stripe.customers.create({
+    email: email,
+    name: name,
+    phone: phone,
+  });
+  // Create a PaymentIntent with the order amount and currency
+  const paymentIntent = await stripe.paymentIntents.create({
+    customer: customer.id,
+    setup_future_usage: "off_session",
+    amount: amount,
+    currency: "usd",
+  });
+
+  res.send({
+    clientSecret: paymentIntent.client_secret,
+  });
+});
+
+app.get("/api/shop-info", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `{
+           shop {
+             name
+             url
+             email
+             myshopifyDomain
+           }
+         }`,
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+// GET /api/shopify-products?q=water
+app.get("/api/shopify-products", async (req, res) => {
+  const searchQuery = req.query.q;
+
+  if (!searchQuery || typeof searchQuery !== "string") {
+    return res.status(400).json({ error: "Missing or invalid search query." });
+  }
+
+  const query = `
+    {
+      products(first: 20, query: "${searchQuery.replace(/"/g, '\\"')}") {
+        edges {
+          node {
+            id
+            title
+            handle
+            variants(first: 10) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  price
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const json = await response.json();
+    const results = json?.data?.products?.edges?.map(({ node }) => ({
+      id: node.id,
+      title: node.title,
+      handle: node.handle,
+      variants: node.variants.edges.map(({ node: variant }) => ({
+        id: variant.id,
+        title: variant.title,
+        sku: variant.sku,
+        price: variant.price,
+      })),
+    }));
+
+    res.status(200).json(results);
+  } catch (error) {
+    console.error("Shopify search failed:", error);
+    res.status(500).json({ error: "Failed to fetch products from Shopify." });
+  }
+});
+
+
+app.post("/api/create-shopify-item", async (req, res) => {
+  const { title, price, sku, vendor } = req.body;
+
+  if (!title || typeof price !== "number") {
+    return res.status(400).json({ error: "Missing title or price" });
+  }
+
+  try {
+    const response = await fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/2023-10/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({
+          query: `
+            mutation productCreate($input: ProductInput!) {
+              productCreate(input: $input) {
+                product {
+                  id
+                  title
+                  variants(first: 1) {
+                    edges {
+                      node {
+                        id
+                        price
+                        sku
+                      }
+                    }
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          variables: {
+            input: {
+              title,
+              vendor,
+              variants: [
+                {
+                  price: price.toFixed(2),
+                  sku: sku || undefined,
+                },
+              ],
+            },
+          },
+        }),
+      }
+    );
+
+    const result = await response.json();
+    const errors = result.data?.productCreate?.userErrors;
+    if (errors && errors.length > 0) {
+      return res.status(400).json({ error: errors.map((e) => e.message).join(", ") });
+    }
+
+    const product = result.data.productCreate.product;
+    const variant = product.variants.edges[0].node;
+
+    res.json({
+      line_item_id: product.id,
+      variant_id: variant.id,
+    });
+  } catch (err) {
+    console.error("Error creating Shopify item:", err);
+    res.status(500).json({ error: "Failed to create Shopify product" });
+  }
+});
+
+
+app.get("/api/metafield/:namespace", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query($query:String!,$num:Int!){
+        shop{
+          metafields(namespace:$query, first:$num) {
+            edges {
+              node {
+                key
+                namespace
+                value
+              }
+            }
+          }
+        }
+      }`,
+      variables: { query: req.params.namespace, num: 10 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/tender-transactions", (req, res) => {
+  const term = `processed_at:>${req.body.startDate}T00:00:00-0500 AND processed_at:<${req.body.endDate}T00:00:00-0500`;
+  let vbs;
+  if (req.body.cursor) {
+    vbs = { query: term, num: req.body.num, cursor: req.body.cursor };
+  } else {
+    vbs = { query: term, num: req.body.num };
+  }
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `query($query:String!,$num:Int!${
+          req.body.cursor ? `,$cursor:String!` : ``
+        }){
+        tenderTransactions(reverse:true,query:$query, first:$num ${
+          req.body.cursor ? `after:$cursor` : ``
+        }) {
+          edges {
+            cursor
+            node {
+              id
+              processedAt
+              amount{
+                  amount
+              }
+              order {
+                tags
+                taxExempt
+                customer {
+                  displayName
+                  email
+                  taxExempt
+                  defaultAddress {
+                    company
+                    formatted
+                  }
+                }
+                return_items: metafield(namespace: "zdtpos", key: "return_items") {
+                  key
+                  value
+                }
+                refund_transactions: metafield(namespace: "zdtpos", key: "refund_transactions") {
+                  key
+                  value
+                }
+                taxLines {
+                  priceSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                }
+                refunds(first:30){
+                  transactions(first:30){
+                    edges{
+                      node{
+                        amountSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                    }
+                  }
+                  refundLineItems(first:30){
+                    edges{
+                      node{
+                        id
+                        lineItem {
+                          title
+                          id
+                          vendor
+                          taxable
+                        }
+                        quantity
+                        priceSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                  }
+                  }
+                }
+                transactions(first:200){
+                  amountSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                  fees {
+                    amount{
+                      amount
+                    }
+                  }
+                  formattedGateway
+                  kind
+                }
+                lineItems(first:30){
+                  edges{
+                    node{
+                      title
+                      taxable
+                      id
+                      variantTitle
+                      discountedUnitPriceSet{
+                        shopMoney{
+                          amount
+                        }
+                      }
+                      quantity
+                      refundableQuantity
+                      vendor
+                    }
+                  }
+                }
+              }
+
+            }
+          }
+          pageInfo{
+            hasNextPage
+          }
+        }
+    }      
+    `,
+        variables: vbs,
+      }),
+    }
+  )
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.get("/api/tender-transactions", (req, res) => {
+  const { startDate, endDate, cursor, num } = req.query;
+  
+  const term = `processed_at:>${startDate}T00:00:00-0500 AND processed_at:<${endDate}T00:00:00-0500`;
+  
+  let vbs;
+  if (cursor) {
+    vbs = { query: term, num: parseInt(num as string), cursor };
+  } else {
+    vbs = { query: term, num: parseInt(num as string) };
+  }
+
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `query($query:String!,$num:Int!${
+          cursor ? `,$cursor:String!` : ``
+        }){
+        tenderTransactions(query:$query, first:$num ${
+          cursor ? `after:$cursor` : ``
+        }) {
+          edges {
+            cursor
+            node {
+              id
+              processedAt
+              amount{
+                  amount
+              }
+              order {
+                tags
+                taxExempt
+                customer {
+                  displayName
+                  email
+                  taxExempt
+                  defaultAddress {
+                    company
+                    formatted
+                  }
+                }
+                return_items: metafield(namespace: "zdtpos", key: "return_items") {
+                  key
+                  value
+                }
+                refund_transactions: metafield(namespace: "zdtpos", key: "refund_transactions") {
+                  key
+                  value
+                }
+                taxLines {
+                  priceSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                }
+                refunds(first:30){
+                  transactions(first:30){
+                    edges{
+                      node{
+                        amountSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                    }
+                  }
+                  refundLineItems(first:30){
+                    edges{
+                      node{
+                        id
+                        lineItem {
+                          title
+                          id
+                          vendor
+                          taxable
+                        }
+                        quantity
+                        priceSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                  }
+                  }
+                }
+                transactions(first:200){
+                  amountSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                  fees {
+                    amount{
+                      amount
+                    }
+                  }
+                  formattedGateway
+                  kind
+                }
+                lineItems(first:30){
+                  edges{
+                    node{
+                      title
+                      taxable
+                      id
+                      variantTitle
+                      discountedUnitPriceSet{
+                        shopMoney{
+                          amount
+                        }
+                      }
+                      quantity
+                      refundableQuantity
+                      vendor
+                    }
+                  }
+                }
+              }
+
+            }
+          }
+          pageInfo{
+            hasNextPage
+          }
+        }
+    }      
+    `,
+        variables: vbs,
+      }),
+    }
+  )
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/tender-count", (req, res) => {
+  interface VbsType {
+    query: string;
+    num: any;
+    cursor?: string; // The '?' indicates that cursor is optional
+  }
+
+  const performFetch = (vbs: VbsType, retries = 3) => {
+    return fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({
+          query: `query($query:String!,$num:Int!${
+            req.body.cursor ? `,$cursor:String!` : ``
+          }){
+          tenderTransactions(reverse:true,query:$query, first:$num ${
+            req.body.cursor ? `after:$cursor` : ``
+          }) {
+            edges {
+              node {
+                id
+                processedAt
+                amount{
+                  amount
+                }
+                order {
+                  id
+                }
+              }
+              cursor
+            }
+            pageInfo{
+              hasNextPage
+            }
+          }
+      }`,
+          variables: vbs,
+        }),
+      }
+    )
+      .then((result) => {
+        console.log("HTTP Status Code:", result.status);
+        return result.json();
+      })
+      .then((data) => {
+        if (
+          data.errors &&
+          data.errors.some((e) => e.extensions.code === "THROTTLED") &&
+          retries > 0
+        ) {
+          const requestedQueryCost = data.extensions.cost.requestedQueryCost;
+          const currentlyAvailable =
+            data.extensions.cost.throttleStatus.currentlyAvailable;
+          const restoreRate = data.extensions.cost.throttleStatus.restoreRate;
+          const waitTime =
+            Math.ceil((requestedQueryCost - currentlyAvailable) / restoreRate) *
+            1000;
+
+          console.log(`Throttled! Retrying in ${waitTime}ms...`);
+          return new Promise((resolve) =>
+            setTimeout(() => resolve(performFetch(vbs, retries - 1)), waitTime)
+          );
+        }
+        return data;
+      });
+  };
+
+  const term = `processed_at:>${req.body.startDate}T00:00:00-0500 AND processed_at:<${req.body.endDate}T00:00:00-0500`;
+  const vbs: VbsType = { query: term, num: req.body.num };
+
+  if (req.body.cursor) {
+    vbs.cursor = req.body.cursor;
+  }
+
+  performFetch(vbs)
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/get-orders", (req, res) => {
+  const orderIds = req.body.orderIds;
+  const shopifyBaseUrl =
+    "https://zdts-amusement-park.myshopify.com/admin/api/2023-10/orders.json";
+
+  if (!orderIds || orderIds.length > 250) {
+    res.status(400).send("OrderIds are required and can't be more than 250.");
+    return;
+  }
+
+  const idsString = orderIds.join(",");
+
+  const shopUrl = `${shopifyBaseUrl}?limit=250&ids=${idsString}&status=any`;
+  console.log(shopUrl);
+  fetch(shopUrl, {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+  })
+    .then((response) => {
+      //console.log("Shopify response headers:", response.headers.raw());
+      //console.log("Shopify response status:", response.status);
+
+      if (!response.ok) {
+        throw new Error(`Server response: ${response.status}`);
+      }
+      return response.json();
+    })
+    .then((data) => {
+      //console.log("response data:",data);
+      res.send(data);
+    })
+    .catch((error) => {
+      console.error("Error fetching orders:", error);
+      res.status(500).send("Internal Server Error");
+    });
+});
+
+app.get("/api/party-dates", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findProducts($query: String!, $num: Int!) {
+        collections(first: 1, query: $query) {
+          edges {
+            cursor
+            node {
+              products(first:$num) {
+                edges {
+                  node {
+                    id
+                    title
+                    handle
+                    totalInventory
+                    totalVariants
+                    variants(first: 1) {
+                      edges {
+                        node {
+                          sku
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      variables: { query: "party rooms", num: 100 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.get("/api/search-variants/:sku", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findVariants($query: String!, $num: Int!) {
+        productVariants(first: $num, query: $query) {
+          edges {
+            node {
+              id
+              sku
+              inventoryQuantity
+              product {
+                title
+                id
+              }
+              inventoryItem{
+                id
+                inventoryLevels(first:1){
+                  edges{
+                    node{
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      variables: { query: `${req.params.sku} OR TODAY OR ANYDAY`, num: 20 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/search-customers", (req: Request, res) => {
+  const query = req.body.query;
+  const num = 3; // Adjust num as needed
+  fetch(
+    `https://zdts-amusement-park.myshopify.com/admin/api/2024-01/customers/search.json?query=${query}&limit=${num}`,
+    {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => res.send(data))
+    .catch((error) => console.log(error.message));
+});
+
+// Create a new Shopify customer
+app.post("/api/customer", async (req, res) => {
+  // Extract the required fields from the request body
+  const { firstName, lastName, email } = req.body;
+
+  // Simple validation to ensure we have the data we need
+  if (!firstName || !lastName || !email) {
+    return res.status(400).json({
+      message:
+        "Missing required fields: firstName, lastName, and email are needed.",
+    });
+  }
+
+  // GraphQL mutation for creating a customer in Shopify
+  const query = `
+    mutation createCustomer($input: CustomerInput!) {
+      customerCreate(input: $input) {
+        customer {
+          id
+          firstName
+          lastName
+          email
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  // Prepare the mutation variables
+  const variables = {
+    input: {
+      firstName: firstName,
+      lastName: lastName,
+      email: email,
+      // You can include additional fields here, e.g.: phone, tags, addresses, etc.
+    },
+  };
+
+  try {
+    // Make the GraphQL request to Shopify
+    const response = await fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/2025-04/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken, // Ensure shopifyToken is defined in your app
+        },
+        body: JSON.stringify({ query, variables }),
+      }
+    );
+
+    // If Shopify responded with a non-OK status, forward the error status
+    if (!response.ok) {
+      console.error("Failed to create Shopify customer: response not OK");
+      return res
+        .status(response.status)
+        .send("Failed to create Shopify customer.");
+    }
+
+    // Parse the JSON response
+    const data = await response.json();
+
+    // Check for user errors returned by Shopify
+    const userErrors = data?.data?.customerCreate?.userErrors;
+    if (userErrors && userErrors.length > 0) {
+      console.error("Shopify customerCreate user errors:", userErrors);
+      return res.status(400).json({ errors: userErrors });
+    }
+
+    // Extract the created customer from Shopify's response
+    const createdCustomer = data?.data?.customerCreate?.customer;
+    if (!createdCustomer) {
+      console.error("No customer returned from Shopify");
+      return res
+        .status(500)
+        .send("Shopify did not return the created customer.");
+    }
+
+    // Respond with the newly created Shopify customer's info
+    return res.status(201).json({
+      message: "Shopify customer created successfully.",
+      shopifyCustomer: createdCustomer,
+    });
+  } catch (error) {
+    console.error("Error creating Shopify customer:", error);
+    return res
+      .status(500)
+      .send("An error occurred while creating the Shopify customer.");
+  }
+});
+
+app.get("/api/customers/:query", (req, res) => {
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/2025-04/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `
+        query SearchCustomers($query: String!) {
+        customers(first: 3, query: $query) {
+          edges {
+            node {
+              id
+              firstName
+              lastName
+              email
+              phone
+              storeCreditAccounts(first: 100) {
+                edges {
+                  node {
+                    balance {
+                    amount
+                    currencyCode
+                    }
+                  }
+                }
+              }
+              defaultAddress {
+                address1
+                address2
+                city
+                province
+                provinceCode
+                country
+                countryCodeV2
+                zip
+                phone
+                company
+              }
+              taxExempt
+            }
+          }
+        }
+        }
+      `,
+        variables: { query: req.params.query },
+      }),
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => {
+      console.error("Error fetching customers:", error.message);
+      res.status(500).send("An error occurred while fetching customer data.");
+    });
+});
+
+app.get("/api/customers/:identifier/store-credit", (req, res) => {
+  const identifier = req.params.identifier;
+
+  // Check if numeric ID vs. email
+  const isNumericId = /^\d+$/.test(identifier);
+  const isEmail =
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier.toLowerCase()) && !isNumericId;
+
+  let query, variables;
+
+  if (isNumericId) {
+    // Query by numeric Customer ID
+    query = `
+      query GetStoreCreditById($id: ID!) {
+        customer(id: $id) {
+          id
+          email
+          storeCreditAccounts(first: 1) {
+            edges {
+              node {
+                id
+                balance {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    variables = { id: `gid://shopify/Customer/${identifier}` };
+  } else if (isEmail) {
+    // Query by email
+    query = `
+      query GetStoreCreditByEmail($query: String!) {
+        customers(first: 1, query: $query) {
+          edges {
+            node {
+              id
+              email
+              storeCreditAccounts(first: 1) {
+                edges {
+                  node {
+                    id
+                    balance {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    variables = { query: `email:${identifier.toLowerCase()}` };
+  } else {
+    return res
+      .status(400)
+      .send("Invalid identifier. Must be numeric or a valid email.");
+  }
+
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/2025-04/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({ query, variables }),
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => {
+      let storeCreditAccount;
+      let customerObj;
+
+      if (isNumericId) {
+        customerObj = data?.data?.customer;
+        if (!customerObj) {
+          return res
+            .status(404)
+            .send("No customer found with the provided numeric ID.");
+        }
+        storeCreditAccount = customerObj?.storeCreditAccounts?.edges?.[0]?.node;
+      } else {
+        const edge = data?.data?.customers?.edges?.[0];
+        customerObj = edge?.node;
+        if (!customerObj) {
+          return res.status(404).send("No customer found matching that email.");
+        }
+        if (customerObj.email?.toLowerCase() !== identifier.toLowerCase()) {
+          return res
+            .status(404)
+            .send("No exact customer match for that email.");
+        }
+        storeCreditAccount = customerObj?.storeCreditAccounts?.edges?.[0]?.node;
+      }
+
+      // If the customer exists but has no store credit account
+      if (!storeCreditAccount) {
+        // Return the *customer* ID
+        // (This implies they don’t have a store-credit account yet)
+        return res.send({
+          balance: "0",
+          currencyCode: "USD",
+          id: customerObj.id, // e.g. "gid://shopify/Customer/12345"
+        });
+      }
+
+      // If they DO have a store credit account
+      return res.send({
+        balance: storeCreditAccount.balance.amount,
+        currencyCode: storeCreditAccount.balance.currencyCode,
+        id: storeCreditAccount.id, // e.g. "gid://shopify/StoreCreditAccount/9999"
+      });
+    })
+    .catch((error) => {
+      console.error("Error fetching store credit:", error.message);
+      res.status(500).send("Error fetching store credit.");
+    });
+});
+
+app.put("/api/customers/:id/store-credit", (req, res) => {
+  const { amount, currencyCode, type } = req.body;
+  // type is "credit" or "debit"
+  const storeCreditAccountOrCustomerGlobalId = req.params.id;
+
+  // If it's a "credit", we use storeCreditAccountCredit, otherwise storeCreditAccountDebit
+  const mutation =
+    type === "credit"
+      ? `
+        mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+          storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+            storeCreditAccountTransaction {
+              amount {
+                amount
+                currencyCode
+              }
+              account {
+                id
+                balance {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+            userErrors {
+              message
+              field
+            }
+          }
+        }
+      `
+      : `
+        mutation storeCreditAccountDebit($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+          storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+            storeCreditAccountTransaction {
+              amount {
+                amount
+                currencyCode
+              }
+              account {
+                id
+                balance {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+            userErrors {
+              message
+              field
+            }
+          }
+        }
+      `;
+
+  const inputKey = type === "credit" ? "creditInput" : "debitInput";
+
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/2025-04/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: mutation,
+        variables: {
+          id: storeCreditAccountOrCustomerGlobalId, // Use the ID as given (could be storeCreditAccount or Customer)
+          [inputKey]: {
+            [`${type}Amount`]: {
+              amount: amount.toString(),
+              currencyCode,
+            },
+          },
+        },
+      }),
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => {
+      const response =
+        data?.data?.storeCreditAccountCredit ??
+        data?.data?.storeCreditAccountDebit;
+
+      if (response?.userErrors?.length) {
+        return res.status(400).json(response.userErrors);
+      }
+
+      // Return the new balance + account ID
+      const account = response?.storeCreditAccountTransaction?.account;
+      return res.json({
+        balance: account?.balance,
+        id: account?.id,
+      });
+    })
+    .catch((error) => {
+      console.error("Error updating store credit:", error.message);
+      res.status(500).send("Error updating store credit.");
+    });
+});
+
+app.get("/api/party-times/:date", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findProducts($query: String!, $num: Int!) {
+        products(first: $num, query: $query) {
+          edges {
+            cursor
+            node {
+              id
+              title
+              totalInventory
+              variants(first:10) {
+                edges {
+                  node {
+                    id
+                    title
+                    inventoryQuantity
+                    sku
+                    price
+                  }
+                }
+              }
+            }
+          }
+        }
+    }`,
+      variables: { query: req.params.date, num: 30 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.get("/api/item-search/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findItems($query: String!, $num: Int!) {
+        items(first: $num, query: $query) {
+          edges {
+            node {
+              id
+              name
+              pluNumber
+              inventory {
+                quantity
+                location
+              }
+            }
+          }
+        }
+      }`,
+      variables: { query: `pluNumber:*${req.query.term}*`, num: 10 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/order-search/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findOrders($query: String!, $num: Int!, $items: Int!, $sortKey: OrderSortKeys!) {
+        orders(first: $num, reverse:true, query: $query, sortKey: $sortKey) {
+          edges {
+            node {
+              customer {
+                displayName
+              }
+              id
+              tags
+              name
+              fulfillable
+              fulfillments {
+                id
+                status
+                fulfillmentLineItems(first: $items){
+                  edges{
+                    node{
+                      lineItem{
+                        title
+                        id
+                      }
+                      quantity
+                    }
+                  }
+                }
+              }
+              lineItems(first: $items){
+                edges{
+                  node{
+                    id
+                    title
+                    sku
+                    variantTitle
+                    quantity
+                    unfulfilledQuantity
+                    fulfillableQuantity
+                    nonFulfillableQuantity
+                    refundableQuantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      variables: {
+        query: req.body.term,
+        num: 10,
+        items: 10,
+        sortKey: "CREATED_AT",
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/order-id-search/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `
+        query findOrders($query: String!, $num: Int!, $sortKey: OrderSortKeys!) {
+          orders(first: $num, reverse:true, query: $query, sortKey: $sortKey) {
+            edges {
+              node {
+                id
+              }
+              cursor
+            }
+            pageInfo{
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
+          }
+        }
+      `,
+      variables: { query: req.body.term, num: 250, sortKey: "CREATED_AT" },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/fulfillment-order-search/", (req, res) => {
+  const defaultNum = 10; // Set your default values here
+  const defaultItems = 5;
+  const defaultFulfillmentItems = 5;
+  const defaultLineItems = 5;
+
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findOrders($query: String!, $num: Int!, $items: Int!, $sortKey: OrderSortKeys!, $cursor: String = null,$forward: Boolean = true, $fulfillmentItems: Int!, $lineItems: Int!) {
+        orders(first: $num, reverse:$forward, query: $query, sortKey: $sortKey, after:$cursor) {
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+          edges {
+            cursor
+            node {
+              fulfillmentOrders(first: $items, reverse: true){
+                pageInfo {
+                  hasNextPage
+                  hasPreviousPage
+                }
+                edges{
+                  node{
+                    id
+                    status
+                    fulfillments(first:$fulfillmentItems){
+                      pageInfo {
+                        hasNextPage
+                        hasPreviousPage
+                      }
+                      edges{
+                        node{
+                          id
+                          displayStatus
+                        }
+                      }
+                    }
+                    lineItems(first: $lineItems){
+                      pageInfo {
+                        hasNextPage
+                        hasPreviousPage
+                      }
+                      edges{
+                        node{
+                          id
+                          remainingQuantity
+                          totalQuantity
+                          lineItem{
+                            id
+                            title
+                            sku
+                            variantTitle
+                            nonFulfillableQuantity
+                            customAttributes {
+                              key
+                              value
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              customer {
+                displayName
+              }
+              billingAddress{
+                address1
+                address2
+                city
+                province
+                country
+                zip
+              }
+              id
+              name
+              note
+              hasTimelineComment
+              tags
+              fulfillable
+              customAttributes {
+                key
+                value
+              }
+            }
+          }
+        }
+      }`,
+      variables: {
+        query: req.body.term,
+        num: req.body.num || defaultNum,
+        items: req.body.items || defaultItems,
+        sortKey: "CREATED_AT",
+        cursor: req.body.cursor,
+        forward: req.body.forward,
+        fulfillmentItems: req.body.fulfillmentItems || defaultFulfillmentItems,
+        lineItems: req.body.lineItems || defaultLineItems,
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/fulfill/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation fulfillmentCreate($input: FulfillmentInput!) {
+        fulfillmentCreate(input: $input) {
+          fulfillment {
+            id
+          }
+          order {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: { input: req.body.input },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/fulfillv2/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+        fulfillmentCreateV2(fulfillment: $fulfillment) {
+          fulfillment {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: {
+        fulfillment: {
+          lineItemsByFulfillmentOrder: req.body.input.lineItems,
+          notifyCustomer: req.body.input.notify,
+          originAddress: {
+            address1: "1218 N Camp St",
+            address2: "",
+            city: "Seguin",
+            countryCode: "US",
+            provinceCode: "TX",
+            zip: "78155",
+          },
+          trackingInfo: {},
+        },
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/cancel-order", async (req: Request, res: Response) => {
+  // Pull in everything we need from the client
+  const {
+    orderId,
+    refund = true,
+    email = false,      // whether to notify customer
+    restock = true,    // whether to restock inventory
+    reason = 'OTHER',     // one of: 'customer' | 'inventory' | 'fraud' | 'declined' | 'other'
+    staffNote   // optional internal note
+  } = req.body;
+
+  if (!orderId || !reason) {
+    return res
+      .status(400)
+      .send("orderId and reason are required for a GraphQL cancellation.");
+  }
+
+  try {
+    // Build the GraphQL mutation string
+    const mutation = `
+      mutation orderCancel(
+        $orderId: ID!,
+        $notifyCustomer: Boolean!,
+        $reason: OrderCancelReason!,
+        $refund: Boolean!,
+        $restock: Boolean!,
+        $staffNote: String
+      ) {
+        orderCancel(
+          orderId: $orderId,
+          notifyCustomer: $notifyCustomer,
+          reason: $reason,
+          refund: $refund,
+          restock: $restock,
+          staffNote: $staffNote
+        ) {
+          job {
+            id
+            done
+          }
+          orderCancelUserErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    // Prepare the variables object
+    const variables: Record<string, any> = {
+      orderId,                              // GraphQL global ID for the order
+      notifyCustomer: Boolean(email),       // map your "email" flag
+      reason: reason.toUpperCase(),         // must be uppercase enum
+      refund: refund,   // full refund only
+      restock: Boolean(restock),            // restock items?
+      staffNote: staffNote || null          // include staff note or null
+    };
+
+    // Perform the fetch against Shopify’s GraphQL endpoint
+    const response = await fetch(
+      `https://${shopName}.myshopify.com/admin/api/2025-04/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({ query: mutation, variables }),
+      }
+    );
+
+    // If Shopify returns userErrors, bubble them up
+        const payload = await response.json();
+    console.error("GraphQL cancel raw response:", JSON.stringify(payload));
+
+    // 1) HTTP‐level errors
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    // 2) Top‐level GraphQL errors
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+      const msgs = payload.errors.map((e: any) => e.message).join("; ");
+      throw new Error(`GraphQL errors: ${msgs}`);
+    }
+
+    // 3) Missing data or missing mutation result
+    if (!payload.data || !payload.data.orderCancel) {
+      throw new Error(
+        `Unexpected response shape, no data.orderCancel: ${JSON.stringify(payload)}`
+      );
+    }
+
+    // 4) Schema‐level user errors
+    const userErrors = payload.data.orderCancel.orderCancelUserErrors || [];
+    if (userErrors.length) {
+      const msgs = userErrors.map((e: any) => `${e.field}: ${e.message}`).join("; ");
+      throw new Error(`User errors: ${msgs}`);
+    }
+
+    // Success — return the job info
+    res.status(200).send(payload.data.orderCancel.job);
+
+  } catch (error) {
+    // Log everything for debugging
+    console.error("Error in GraphQL cancel:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+
+app.post("/api/cancel-order", async (req: Request, res: Response) => {
+  const { orderId, amount, email, restock, reason } = req.body;
+
+  if (!orderId) {
+    return res.status(400).send("Order ID is required.");
+  }
+
+  try {
+    const cancelData: any = {};
+
+    cancelData.amount = amount ?? 0;
+
+    cancelData.email = email ?? false;
+
+    cancelData.restock = restock ?? true;
+
+    if (reason) {
+      cancelData.reason = reason;
+    }
+
+    const response = await fetch(
+      `https://${shopName}.myshopify.com/admin/api/2024-04/orders/${orderId}/cancel.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify(cancelData),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Error canceling order: ${errorData.errors}`);
+    }
+
+    const data = await response.json();
+    res.status(200).send(data);
+  } catch (error) {
+    console.error("Error canceling order:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.post("/api/cancel-fulfill/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation fulfillmentCancel($id: ID!) {
+        fulfillmentCancel(id: $id) {
+          fulfillment {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: {
+        id: req.body.fulId,
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/order-update/", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation orderUpdate($input: OrderInput!) {
+        orderUpdate(input: $input) {
+          order {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: {
+        input: req.body.input,
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.get("/api/party-info/:id", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query findOrders($query: String!, $num: Int!, $sortKey: OrderSortKeys!) {
+        orders(first: $num, reverse:true, query: $query, sortKey: $sortKey) {
+          edges {
+            node {
+              id
+              createdAt
+              totalReceivedSet{
+                shopMoney{
+                  amount
+                }
+              }
+              billingAddress {
+                phone
+              }
+              customer {
+                displayName
+                firstName
+                lastName
+                email
+                phone
+              }
+              name
+              lineItems(first: $num){
+                edges{
+                  node{
+                    originalTotalSet{
+                      shopMoney{
+                        amount
+                      }
+                    }
+                    title
+                    variantTitle
+                    variant {
+                      id
+                    }
+                    product {
+                      id
+                      title
+                    }
+                    id
+                    sku
+                    refundableQuantity
+                    customAttributes {
+                      key
+                      value
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      variables: { query: req.params.id, num: 5, sortKey: "CREATED_AT" },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/create-draft-order", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation draftOrderCreate($input: DraftOrderInput!) {
+        draftOrderCreate(input: $input) {
+          draftOrder {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: { input: req.body },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/update-draft-order", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation draftOrderUpdate($id: ID!, $input: DraftOrderInput!) {
+        draftOrderUpdate(id: $id, input: $input) {
+          draftOrder {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: { input: req.body.input, id: req.body.id },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/complete-order", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation draftOrderComplete($id: ID!) {
+        draftOrderComplete(id: $id) {
+          draftOrder {
+            id
+            order {
+              id
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: { id: req.body.id },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/cancel", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `mutation refundCreate($input: RefundInput!) {
+        refundCreate(input: $input) {
+          order {
+            id
+          }
+          refund {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }`,
+      variables: {
+        input: {
+          orderId: req.body.orderId,
+          currency: "USD",
+          notify: false,
+          note: "party edited by Dashboard App",
+          refundLineItems: {
+            lineItemId: req.body.lineItemId,
+            quantity: 1,
+            restockType: "CANCEL",
+            locationId: "gid://shopify/Location/16306929777",
+          },
+          transactions: {
+            amount: 0,
+            gateway: "Manual",
+            kind: "CHANGE",
+            orderId: req.body.orderId,
+          },
+        },
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/update-inventory", (req, res) => {
+  const { variantId, quantity } = req.body; // Using quantity instead of delta
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `
+      mutation InventorySet($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          inventoryAdjustmentGroup {
+            createdAt
+            reason
+            changes {
+              name
+              delta
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+      `,
+        variables: {
+          input: {
+            name: "available",
+            reason: "correction",
+            ignoreCompareQuantity: true,
+            quantities: [
+              {
+                inventoryItemId: variantId, // Assuming variantId matches inventoryItemId format
+                locationId: "gid://shopify/Location/16306929777",
+                quantity: quantity,
+              },
+            ],
+          },
+        },
+      }),
+    }
+  )
+    .then((result) => result.json())
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => {
+      console.error(error.message);
+      res.status(500).send({ error: error.message });
+    });
+});
+
+app.post("/api/delete-variant", (req, res) => {
+  const { variantId } = req.body;
+
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `
+        mutation deleteProductVariant($id: ID!) {
+          productVariantDelete(id: $id) {
+            deletedProductVariantId
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      variables: {
+        id: variantId,
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      if (data.errors) {
+        console.log(data.errors);
+        res.status(400).json({
+          message: "Failed to delete product variant.",
+          errors: data.errors,
+        });
+      } else {
+        res.status(200).json({
+          message: "Product variant successfully deleted.",
+          data: data.data,
+        });
+      }
+    })
+    .catch((error) => {
+      console.log(error.message);
+      res.status(500).json({
+        message: "An error occurred while deleting the product variant.",
+      });
+    });
+});
+
+app.post("/api/delete-product", (req, res) => {
+  const { productId } = req.body;
+
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `
+        mutation deleteProduct($id: ID!) {
+          productDelete(input: { id: $id }) {
+            deletedProductId
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      variables: {
+        id: productId,
+      },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      if (data.errors) {
+        console.log(data.errors);
+        res
+          .status(400)
+          .json({ message: "Failed to delete product.", errors: data.errors });
+      } else {
+        res
+          .status(200)
+          .json({ message: "Product successfully deleted.", data: data.data });
+      }
+    })
+    .catch((error) => {
+      console.log(error.message);
+      res
+        .status(500)
+        .json({ message: "An error occurred while deleting the product." });
+    });
+});
+
+app.post("/api/product-fetch-by-collection", (req, res) => {
+  fetch("https://zdts-amusement-park.myshopify.com/admin/api/graphql.json", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": shopifyToken,
+    },
+    body: JSON.stringify({
+      query: `query fetchVariants($collection: String!, $num: Int!) {
+        products(first: $num, query: $collection) {
+          edges {
+            node {
+              title
+              variants(first: 4) {
+                edges {
+                  node {
+                    id
+                    title
+                    sku
+                    price
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      variables: { collection: req.body.collection, num: 25 },
+    }),
+  })
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      // Transform the response to match the format expected by your frontend
+      console.log(data);
+      const variants = data.data.products.edges.flatMap((edge) =>
+        edge.node.variants.edges.map((variantEdge) => {
+          const variant = variantEdge.node;
+          return {
+            title: edge.node.title,
+            sku: variant.sku,
+            originalUnitPrice: parseFloat(variant.price),
+            quantity: 1,
+          };
+        })
+      );
+
+      res.send({ products: variants });
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/create-order", async (req, res) => {
+  // Helper function to make the fetch call
+  const makeRequest = () => {
+    return fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/2024-01/orders.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({
+          order: req.body,
+        }),
+      }
+    );
+  };
+
+  try {
+    // First attempt to send the order
+    const result = await makeRequest();
+    const data = await result.json();
+    return res.send(data);
+  } catch (error) {
+    // Log the error from the first attempt
+    console.error("First attempt failed:", error.message);
+    // Wait for 1 second before retrying
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    try {
+      // Second attempt to send the order
+      const retryResult = await makeRequest();
+      const retryData = await retryResult.json();
+      return res.send(retryData);
+    } catch (retryError) {
+      // Log error from the retry attempt and return error response
+      console.error("Second attempt failed:", retryError.message);
+      return res.status(500).send({ message: retryError.message });
+    }
+  }
+});
+
+app.post("/api/adjust-inventory", (req, res) => {
+  const { variantId, adjustment } = req.body;
+
+  // First, fetch the inventory item ID using the variant ID
+  fetch(
+    `https://zdts-amusement-park.myshopify.com/admin/api/2024-04/variants/${variantId}.json`,
+    {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+    }
+  )
+    .then((response) => response.json())
+    .then((data) => {
+      if (!data.variant || !data.variant.inventory_item_id) {
+        throw new Error("Variant not found or missing inventory item ID.");
+      }
+      const inventoryItemId = data.variant.inventory_item_id;
+      //console.log('Inventory item ID:', inventoryItemId);
+      // Fetch inventory levels to find the location ID for the inventory item
+      return fetch(
+        `https://zdts-amusement-park.myshopify.com/admin/api/2024-04/inventory_levels.json?inventory_item_ids=${inventoryItemId}`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": shopifyToken,
+          },
+        }
+      )
+        .then((response) => response.json())
+        .then((data) => {
+          if (!data.inventory_levels || data.inventory_levels.length === 0) {
+            throw new Error(
+              "Inventory levels not found for the given inventory item ID."
+            );
+          }
+          // Assume the first location is the one we want to adjust
+          const locationId = data.inventory_levels[0].location_id;
+          return { inventoryItemId, locationId };
+        });
+    })
+    .then(({ inventoryItemId, locationId }) => {
+      // Adjust the inventory with the retrieved inventory item ID and location ID
+      return fetch(
+        "https://zdts-amusement-park.myshopify.com/admin/api/2024-04/inventory_levels/adjust.json",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": shopifyToken,
+          },
+          body: JSON.stringify({
+            location_id: locationId,
+            inventory_item_id: inventoryItemId,
+            available_adjustment: adjustment,
+          }),
+        }
+      );
+    })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.errors) {
+        console.error("Error adjusting inventory:", data.errors);
+        res.status(400).send(data);
+      } else {
+        //console.log('Inventory adjusted successfully:', data);
+        res.send(data);
+      }
+    })
+    .catch((error) => {
+      console.error("Failed to adjust inventory:", error.message);
+      res.status(500).send({ message: error.message });
+    });
+});
+
+app.post("/api/create-membership-discount", async (req, res) => {
+  const discountAmount = parseFloat(req.body.discountAmount);
+  const discountDurationInHours = 30;
+  const discountCode = req.body.discountCode;
+
+  const mutation = `
+    mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+      discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+        codeDiscountNode {
+          id
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+  const variables = {
+    basicCodeDiscount: {
+      code: discountCode.toString(),
+      title: `Discount code ${discountCode}`,
+      appliesOncePerCustomer: true,
+      customerGets: {
+        appliesOnOneTimePurchase: true,
+        appliesOnSubscription: true,
+        value: {
+          discountAmount: {
+            amount: discountAmount.toFixed(2),
+            appliesOnEachItem: true,
+          },
+        },
+        items: {
+          collections: {
+            add: ["gid://shopify/Collection/77818036337"],
+          },
+        },
+      },
+      customerSelection: {
+        all: true,
+      },
+      startsAt: new Date().toISOString(),
+      endsAt: new Date(
+        new Date().getTime() + discountDurationInHours * 60 * 60 * 1000
+      ).toISOString(),
+      usageLimit: 1,
+      recurringCycleLimit: 1,
+    },
+  };
+
+  try {
+    const response = await fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/2024-01/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({ query: mutation, variables: variables }),
+      }
+    );
+
+    const responseData = await response.json();
+
+    if (responseData.data.discountCodeBasicCreate.userErrors.length > 0) {
+      const errors = responseData.data.discountCodeBasicCreate.userErrors
+        .map((err) => err.message)
+        .join(", ");
+      throw new Error(errors);
+    }
+
+    const discountInfo = responseData.data;
+
+    res.send(discountInfo);
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).send({ message: error.message });
+  }
+});
+
+app.post("/api/order-note", async (req: Request, res: Response) => {
+  const { orderId, note } = req.body;
+
+  if (!orderId || !note) {
+    return res.status(400).send("OrderId and note are required.");
+  }
+
+  try {
+    const response = await fetch(
+      `https://${shopName}.myshopify.com/admin/api/2024-04/orders/${orderId}.json`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({
+          order: {
+            id: orderId,
+            note: note,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Error updating order: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    res.status(200).send(data);
+  } catch (error) {
+    console.error("Error updating order:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get("/api/search-order/:orderId", async (req, res) => {
+  const orderIds = req.params.orderId.split(",");
+
+  try {
+    // Fetch orders details
+    const ordersResponse = await fetch(
+      `https://zdts-amusement-park.myshopify.com/admin/api/2023-10/orders.json?status=any&ids=${req.params.orderId}`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+      }
+    );
+    const orderData = await ordersResponse.json();
+
+    // Fetch transactions for each order
+    const transactionsPromises = orderIds.map((id) =>
+      fetch(
+        `https://zdts-amusement-park.myshopify.com/admin/api/2023-10/orders/${id}/transactions.json`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": shopifyToken,
+          },
+        }
+      ).then((result) => result.json())
+    );
+
+    const transactionsResults = await Promise.all(transactionsPromises);
+
+    // Add transactions to each order
+    orderData.orders.forEach((order, index) => {
+      order.transactions = transactionsResults[index].transactions;
+    });
+
+    res.send(orderData);
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).send({ message: error.message });
+  }
+});
+
+app.get("/api/get-fulfillment-orders/:orderId", async (req, res) => {
+  const orderId = req.params.orderId;
+
+  try {
+    const response = await fetch(
+      `https://zdts-amusement-park.myshopify.com/admin/api/2023-04/orders/${orderId}/fulfillment_orders.json`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+      }
+    );
+
+    const data = await response.json();
+    res.send(data);
+  } catch (error) {
+    console.error("Error: ", error.message);
+    res.status(500).send({ message: error.message });
+  }
+});
+
+app.post("/api/batch-fulfill-orders/", async (req, res) => {
+  const { fulfillmentOrderIds, notify, orderId } = req.body;
+  const locationId = "16306929777";
+
+  try {
+    const response = await fetch(
+      `https://zdts-amusement-park.myshopify.com/admin/api/2021-01/orders/${orderId}/fulfillments.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({ fulfillment: { location_id: locationId } }),
+      }
+    );
+
+    const data = await response.json();
+    if (response.ok) {
+      res.send(data);
+    } else {
+      console.error("Shopify API Error Response: ", data);
+      res.status(response.status).send({
+        message: "Shopify API error",
+        error: data,
+        status: response.status,
+      });
+    }
+  } catch (error) {
+    console.error("Error: ", error.message);
+    res.status(500).send({ message: error.message });
+  }
+});
+
+// Endpoint to search employees by a query string
+app.get("/api/search-employees", async (req: Request, res: Response) => {
+  const { query, active } = req.query;
+
+  try {
+    const searchQuery = `
+      SELECT * FROM employees
+      WHERE 
+        (CONCAT(firstname, ' ', lastname) ILIKE $1 OR
+        CONCAT(nickname, ' ', firstname) ILIKE $1)
+        ${
+          active === "true"
+            ? `AND active = true`
+            : active === "false"
+            ? `AND active = false`
+            : ""
+        }
+      ORDER BY firstname ASC
+    `;
+    const values = [`%${query}%`];
+    const result = await queryDB(searchQuery, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({ error: "No employees found" });
+    }
+
+    res.send(result.rows);
+  } catch (error) {
+    console.error("Error searching employees:", error);
+    res.status(500).send({ error: "Server error" });
+  }
+}); 
+
+app.get("/api/kds-orders", async (req: Request, res: Response) => {
+  try {
+    const { status, status2, order_by } = req.query;
+
+    // Build a WHERE clause: if status != 'all', filter by status and optional status2, then time.
+    let whereClause = "";
+    if (status && typeof status === "string" && status.toLowerCase() !== "all") {
+      const statusFilter = `o.status = '${status}'`;
+      const status2Filter =
+        status2 && typeof status2 === "string" && status2 !== ""
+          ? ` OR o.status = '${status2}'`
+          : "";
+      whereClause = `WHERE (${statusFilter}${status2Filter})` // AND o.updated_at >= NOW() - INTERVAL '12 HOURS'`;
+    } else {
+      // No status filter (or status=='all'): include all updated in last 12 hours
+      //whereClause = `WHERE o.updated_at >= NOW() - INTERVAL '12 HOURS'`;
+    }
+
+    // Validate order_by, defaulting to ordering by o.id DESC.
+    const validOrderBy = ["id", "created_at", "updated_at"];
+    const orderBy =
+      order_by &&
+      typeof order_by === "string" &&
+      validOrderBy.includes(order_by)
+        ? `ORDER BY o.${order_by} DESC`
+        : "ORDER BY o.id ASC";
+
+    // New query using JSON aggregation. Each order row includes an "items" array.
+    // Note: The order id is now returned as "id" (instead of "order_id").
+    const query = `
+      SELECT
+        o.id as id,
+        o.pos_order_id,
+        o.order_number,
+        o.status,
+        o.front_released,
+        o.is_fulfilled,
+        o.name,
+        o.created_at,
+        o.updated_at,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', i.id,
+              'item_name', i.item_name,
+              'quantity', i.quantity,
+              'prepared_quantity', i.prepared_quantity,
+              'fulfilled_quantity', i.fulfilled_quantity,
+              'station', i.station,
+              'special_instructions', i.special_instructions,
+              'created_at', i.created_at,
+              'updated_at', i.updated_at
+            )
+            ORDER BY i.id ASC
+          ) FILTER (WHERE i.id IS NOT NULL),
+          '[]'
+        ) AS items
+      FROM kitchen_orders o
+      LEFT JOIN kitchen_order_items i ON o.id = i.kitchen_order_id
+      ${whereClause}
+      GROUP BY o.id
+      ${orderBy}
+      LIMIT 100
+    `;
+
+    const result = await queryDB(query);
+
+    return res.json(result.rows);
+  } catch (error) {
+    console.error("Error fetching KDS orders:", error);
+    return res.status(500).json({ error: "Failed to fetch KDS orders" });
+  }
+});
+
+app.post("/api/kds-order", async (req: Request, res: Response) => {
+  try {
+    const { pos_order_id, order_number, items, status, name } = req.body;
+
+    if (!pos_order_id || !order_number || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    // Insert a new row into kitchen_orders.
+    // The order status is set to 'pending', front_released and is_fulfilled default to false.
+    const orderQuery = `
+      INSERT INTO kitchen_orders (pos_order_id, order_number, status, front_released, is_fulfilled, name)
+      VALUES ($1, $2, $3, false, false, $4)
+      RETURNING id
+    `;
+    const orderResult = await queryDB(orderQuery, [pos_order_id, order_number, status, name]);
+    const kitchenOrderId = orderResult.rows[0].id;
+
+    // If there are items to insert for this kitchen order, build the VALUES clause.
+    if (items.length > 0) {
+      // Each row now requires 7 values:
+      //   kitchen_order_id, item_name, quantity, station, special_instructions,
+      //   prepared_quantity, fulfilled_quantity.
+      const valueClauses = items
+        .map(
+          (_item, index) =>
+            `($${index * 7 + 1}, $${index * 7 + 2}, $${index * 7 + 3}, $${index * 7 + 4}, $${index * 7 + 5}, $${index * 7 + 6}, $${index * 7 + 7})`
+        )
+        .join(", ");
+
+      const values = items.flatMap((item) => [
+        kitchenOrderId,
+        item.item_name,
+        item.quantity,
+        item.station,
+        item.special_instructions || null,
+        // Use the provided prepared_quantity if present, else default to 0.
+        item.prepared_quantity !== undefined ? item.prepared_quantity : 0,
+        // Use the provided fulfilled_quantity if present, else default to 0.
+        item.fulfilled_quantity !== undefined ? item.fulfilled_quantity : 0,
+      ]);
+
+      const itemsQuery = `
+        INSERT INTO kitchen_order_items 
+          (kitchen_order_id, item_name, quantity, station, special_instructions, prepared_quantity, fulfilled_quantity)
+        VALUES ${valueClauses}
+      `;
+      await queryDB(itemsQuery, values);
+    }
+
+    return res.json({
+      success: true,
+      kitchen_order_id: kitchenOrderId,
+    });
+  } catch (error) {
+    console.error("Error creating KDS order:", error);
+    return res.status(500).json({ error: "Failed to create KDS order" });
+  }
+});
+
+
+app.post("/api/kds-items/:id/:status", async (req: Request, res: Response) => {
+  const { id: itemId, status } = req.params;
+  if (
+    !["mark-prepared", "mark-fulfilled", "unmark", "mark-pending"].includes(
+      status
+    )
+  ) {
+    return res.status(400).json({
+      error:
+        "Invalid status, must be one of: mark-prepared, mark-fulfilled, unmark, mark-pending",
+    });
+  }
+
+  try {
+    const updateQuery = `
+      UPDATE kitchen_order_items
+      SET prepared_quantity = (
+        CASE $2
+          WHEN 'mark-prepared' THEN quantity
+          WHEN 'mark-fulfilled' THEN quantity
+          WHEN 'unmark' THEN 0
+          WHEN 'mark-pending' THEN 0
+          ELSE prepared_quantity
+        END
+      ),
+      fulfilled_quantity = (
+        CASE $2
+          WHEN 'mark-fulfilled' THEN quantity
+          WHEN 'unmark' THEN 0
+          WHEN 'mark-pending' THEN 0
+          WHEN 'mark-prepared' THEN 0
+          ELSE fulfilled_quantity
+        END
+      ),
+      updated_at = (CASE $2 WHEN 'mark-prepared' THEN NOW() ELSE updated_at END)
+      WHERE id = $1
+      RETURNING id, prepared_quantity, fulfilled_quantity, quantity
+    `;
+    const result = await queryDB(updateQuery, [itemId, status]);
+
+    if (result.rowCount === 0) {
+      return res
+        .status(400)
+        .json({ error: "Item is already fully prepared or does not exist" });
+    }
+
+    return res.json({
+      success: true,
+      item: result.rows,
+    });
+  } catch (error) {
+    console.error(`Error marking item as ${status}:`, error);
+    return res.status(500).json({ error: `Failed to mark item as ${status}` });
+  }
+});
+
+app.post("/api/kds-orders/:id/:status", async (req: Request, res: Response) => {
+  try {
+    const orderId = req.params.id;
+    const status = req.params.status.split("-")[1];
+    const skipItemUpdate : boolean = req.query.skipItemUpdate ? (req.query.skipItemUpdate as string) === "true" : false;
+
+
+    if (!["ready", "fulfilled", "pending"].includes(status)) {
+      return res.status(400).json({
+        error: "Invalid status, must be one of: ready, fulfilled, pending",
+      });
+    }
+
+    await queryDB("BEGIN");
+
+    // Apply item-level updates based on order status
+    if (status === "ready" && !skipItemUpdate) {
+      await queryDB(
+        `
+        UPDATE kitchen_order_items
+        SET prepared_quantity = quantity,
+            updated_at = NOW()
+        WHERE kitchen_order_id = $1 AND prepared_quantity = 0
+        `,
+        [orderId]
+      );
+    } else if (status === "fulfilled" && !skipItemUpdate) {
+      await queryDB(
+        `
+        UPDATE kitchen_order_items
+        SET prepared_quantity = quantity,
+            fulfilled_quantity = quantity,
+            updated_at = NOW()
+        WHERE kitchen_order_id = $1
+        `,
+        [orderId]
+      );
+    } else if (status === "pending" && !skipItemUpdate) {
+      await queryDB(
+        `
+        UPDATE kitchen_order_items
+        SET prepared_quantity = 0,
+            fulfilled_quantity = 0,
+            updated_at = NOW()
+        WHERE kitchen_order_id = $1
+        `,
+        [orderId]
+      );
+    }
+
+    // Update the kitchen_orders row
+    const updateOrderQuery = `
+      UPDATE kitchen_orders
+      SET status = $2::order_status, updated_at = NOW()
+      WHERE id = $1 OR pos_order_id = $1
+      RETURNING *
+    `;
+    const result = await queryDB(updateOrderQuery, [orderId, status]);
+
+    if (result.rowCount === 0) {
+      await queryDB("ROLLBACK");
+      return res.status(400).json({ error: "Order not found" });
+    }
+
+    await queryDB("COMMIT");
+
+    return res.json({
+      success: true,
+      order: result.rows[0],
+    });
+  } catch (error) {
+    await queryDB("ROLLBACK");
+    console.error(`Error marking order as ${req.params.status}:`, error);
+    return res
+      .status(500)
+      .json({ error: `Failed to mark order as ${req.params.status}` });
+  }
+});
+
+// Shared function to setup PostgreSQL notifications
+async function setupPostgresNotifications(io: SocketIOServer) {
+  try {
+    const notificationClient: PoolClient = await pool.connect();
+    // Do not release this client so it remains dedicated for notifications
+
+    // Setup KDS order update listener
+    try {
+      await notificationClient.query("LISTEN kds_order_update");
+      console.log("Now listening for kds_order_update notifications.");
+    } catch (err) {
+      console.error("Error executing LISTEN kds_order_update query:", err);
+    }
+
+    // Setup transaction update listener
+    try {
+      await notificationClient.query("LISTEN transaction_update");
+      console.log("Now listening for transaction_update notifications.");
+    } catch (err) {
+      console.error("Error executing LISTEN transaction_update query:", err);
+    }
+
+    // Handle notifications
+    notificationClient.on("notification", (msg) => {
+      // Route notifications based on channel
+      if (msg.channel === "kds_order_update") {
+        io.emit("kds_update", "kds needs to update");
+      } else if (msg.channel === "transaction_update") {
+        io.emit("transaction_update", msg.payload || "transaction updated");
+      }
+    });
+
+    notificationClient.on("error", (err) => {
+      console.error("Notification client error:", err);
+    });
+  } catch (err) {
+    console.error("Error obtaining a notification client from the pool:", err);
+  }
+}
+
+// Server setup based on environment
+let server: any;
+let io: SocketIOServer;
+
+if (isProduction()) {
+  app.enable("trust proxy"); // trust Heroku's proxy
+
+  app.use((req, res, next) => {
+    if (req.protocol !== "https") {
+      return res.redirect("https://" + req.headers.host + req.url);
+    }
+    next();
+  });
+
+  // Serve static files from the React app's build folder
+  app.use(express.static(path.join(__dirname, "..", "client", "build")));
+
+  // Send all other requests to the React app's index.html file
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(__dirname, "..", "client", "build", "index.html"));
+  });
+
+  server = http.createServer(app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  const productionPort = env.port === 3001 ? 8080 : env.port;
+
+  server.listen(productionPort, () => {
+    console.log(`Production server running on port ${productionPort}`);
+  });
+
+  setupPostgresNotifications(io);
+
+} else if (isElectron()) {
+  // Electron environment: Use self-signed certificates
+  app.use(express.static(path.join(__dirname, "..", "client", "build")));
+  console.log("device");
+
+  const keyPath = path.join(__dirname, "..", "key.pem");
+  const certPath = path.join(__dirname, "..", "cert.pem");
+
+  const httpsOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+
+  server = https.createServer(httpsOptions, app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  console.log("electron port: ", process.env.ELECTRON_PORT);
+
+  server.listen(process.env.ELECTRON_PORT || 8901, () => {
+    console.log(
+      `Electron (local) server running with SSL on port ${
+        process.env.ELECTRON_PORT || 8901
+      }`
+    );
+  });
+
+  setupPostgresNotifications(io);
+
+} else {
+  console.log("running in dev mode");
+  // Development mode: Use ts-node to run TypeScript files directly
+  app.get("*", (_req, res) => {
+    res.send("Development mode: no static files served.");
+  });
+
+  const keyPath = path.join(__dirname, "key.pem");
+  const certPath = path.join(__dirname, "cert.pem");
+
+  const httpsOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+
+  server = https.createServer(httpsOptions, app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  server.listen(8080, () => {
+    console.log("HTTPS server running in development mode on port 8080");
+  });
+
+  setupPostgresNotifications(io);
+}

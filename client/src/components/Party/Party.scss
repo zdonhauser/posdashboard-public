@@ -1,0 +1,91 @@
+.partywindow{
+    background-color:rgb(167, 167, 167);
+    position: fixed;
+    width:100vw;
+    height: 95vh;
+    left: 0;
+    top: 0;
+    box-sizing: border-box;
+    display:grid;
+    grid-template-columns: 1fr 5fr 1fr;
+    grid-template-rows: 1fr 5fr 1fr;
+    cursor:pointer;
+    user-select: none;
+    overflow-y: scroll;
+    .partyselection{
+        z-index: 1;
+        overflow-y: scroll;
+        grid-area: 1/1/4/4;
+        padding: 5% 10%;
+        background-color:rgb(255, 255, 255);
+    }
+    
+    .partyDetails{
+        z-index: 2;
+        overflow-y: scroll;
+        grid-area: 1/1/4/4;
+        padding: 5% 10%;
+        background-color:rgb(255, 255, 255);
+        h3,h4,h5{
+            margin:3% 0 0 0;
+        }
+        h6{
+            margin:0 0 0 0;
+        }
+        .tinyText{
+            font-size:50%;
+        }
+    }
+    
+    .partyPayment{
+        z-index: 3;
+        overflow-y: scroll;
+        grid-area: 1/1/4/4;
+        padding: 5% 0%;
+        .backbutton{
+            margin: 0% 10%;
+            width:80%
+        }
+        .resbutton{
+            margin: 0% 10%;
+            width:80%
+        }
+        background-color:rgb(255, 255, 255);
+        h3,h4,h5{
+            margin:3% 0 0 0;
+        }
+        h6{
+            margin:0 0 0 0;
+        }
+        .tinyText{
+            font-size:50%;
+        }
+    }
+    
+    select{
+        font-size: 1.2em;
+    }
+    
+    .smallselect{
+        font-size:1em;
+    }
+      
+    input {
+        border-radius: 6px;
+        margin-bottom: 6px;
+        padding: 12px;
+        border: 1px solid black;
+        max-height: 44px;
+        font-size: 16px;
+        background: white;
+        box-sizing: border-box;
+    }
+    
+    textarea{
+        width:100%
+    }
+     option:disabled{
+         background-color: black;
+         color:black;
+     }
+}

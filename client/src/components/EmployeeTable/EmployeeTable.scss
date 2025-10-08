@@ -1,0 +1,347 @@
+.table-container {
+  padding: 1rem;
+  background-color: whitesmoke;
+  height: 93vh;
+  width: 98vw;
+  position: fixed;
+  overflow-y: auto;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.rate-input-cell {
+    position: relative;
+}
+.edit-only-column { display: none; }
+.tr-in-edit-mode .edit-only-column { display: table-cell; }
+.not-editing-row { display: none; }
+.rate-hint-popup {
+    display: block;
+    position: absolute;
+    background-color: #fff;
+    border: 1px solid #ccc;
+    padding: 5px;
+    z-index: 1000;
+    width: max-content;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.rate-hint-popup p {
+    margin: 0;
+    font-size: 12px;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  z-index: 1000;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+
+.modal-content {
+  background-color: #fff;
+  padding: 20px;
+  width: 100%;
+  max-width: 500px;
+  border-radius: 8px;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+  margin: auto;
+  max-height: 60%;
+  overflow-y: auto;
+
+  h2 {
+    margin-top: 0;
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #1a202c;
+    margin-bottom: 1rem;
+  }
+
+  label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    font-size: 0.9rem;
+  }
+
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  select,
+  textarea {
+    width: 100%;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    
+    &:focus {
+      outline: none;
+      border-color: #4299e1;
+      box-shadow: 0 0 0 1px #4299e1;
+    }
+  }
+
+  input[type="checkbox"] {
+    margin-right: 0.5rem;
+    margin-bottom: 1rem;
+  }
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  
+  button {
+    padding: 0.5rem 1rem;
+    background-color: #f8f9fa;
+    border: 2px solid #e2e8f0;
+    border-radius: 4px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: black;
+    font-size: 0.9rem;
+
+    &:hover {
+      background-color: #e2e8f0;
+    }
+
+    &[type="submit"] {
+      background-color: #4299e1;
+      border-color: #4299e1;
+      color: white;
+
+      &:hover {
+        background-color: #3182ce;
+        border-color: #3182ce;
+      }
+    }
+  }
+}
+
+.employee-table {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto 1rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+
+  th, td {
+    padding: 0.5rem;
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  th {
+    background-color: #f8f9fa;
+    color: black;
+    font-weight: bold;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  td {
+    background-color: white;
+  }
+
+  tbody tr {
+    &:hover td {
+      background-color: #f7fafc;
+    }
+  }
+}
+
+.edit-button,
+.add-employee-button,
+.save-button,
+.cancel-button {
+    padding: 6px 12px;
+    margin-right: 5px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    margin: auto;
+    max-width: 100px;
+}
+
+.edit-button {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.save-button {
+    background-color: #008CBA;
+    color: white;
+}
+
+.cancel-button {
+    background-color: #f44336;
+    color: white;
+}
+
+.editing-row {
+    background-color: #fff3cd;
+}
+
+.hidden-row {
+    display: none;
+}
+
+/* Keep the header sticky */
+.employee-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+/* Inputs and checkboxes inside the table */
+.employee-table input[type="text"],
+.employee-table input[type="number"] {
+    width: 100%;
+    padding: 6px;
+    box-sizing: border-box;
+}
+
+.employee-table input[type="checkbox"] {
+    transform: scale(1.2);
+}
+
+/* Editing row container: keep as table-row for layout */
+tr.tr-in-edit-mode {
+  display: block;
+  margin: 1rem auto;
+}
+
+.hide-header {
+    display: none !important;
+}
+
+tr.tr-in-edit-mode td {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: #f7fafc;
+  border: 1px solid #dfe3e8;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  margin: 0.5rem auto;
+  width: 80%;
+  max-width: 600px;
+}
+
+/* Label and input alignment inside each field row */
+tr.tr-in-edit-mode td {
+  /* The "First Name:", "Last Name:", etc. text is the label */
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+tr.tr-in-edit-mode td input[type="text"],
+tr.tr-in-edit-mode td input[type="number"],
+tr.tr-in-edit-mode td select {
+  flex: 2;
+  margin-left: 1rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+tr.tr-in-edit-mode td input[type="checkbox"] {
+  margin-left: 1rem;
+  transform: scale(1.1);
+}
+
+/* Save/Cancel button container */
+tr.tr-in-edit-mode td:last-of-type {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  background: transparent;
+  border: none;
+  margin-top: 1rem;
+  width: 100%;
+  max-width: 600px;
+}
+
+.editing-form .form-actions button {
+  width: 100px;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+
+/* Form group spacing and label styling */
+.editing-form .form-group {
+  margin-bottom: 0.75rem;
+}
+
+.editing-form .form-group label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.editing-form .form-group input[type="text"],
+.editing-form .form-group input[type="number"],
+.editing-form .form-group select {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+/* Credit buttons layout */
+.editing-form .credit-buttons {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.editing-form .credit-buttons input[type="number"] {
+  width: 60px;
+  text-align: center;
+  padding: 0.25rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+}
+
+.editing-form .credit-buttons button {
+  flex: 1;
+  margin: 0 0.5rem;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+
+/* Save & Cancel button group */
+.editing-form .form-actions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}

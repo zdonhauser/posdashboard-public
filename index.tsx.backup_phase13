@@ -1,0 +1,1321 @@
+import express, { Request, Response } from "express";
+import fetch from "node-fetch";
+import bodyParser from "body-parser";
+import path from "path";
+import http from "http";
+import fs from "fs";
+import jwt from "jsonwebtoken";
+import https from "https";
+import { PoolClient } from "pg";
+import { Server as SocketIOServer } from "socket.io";
+
+import { env, isElectron, isProduction } from "@config/environment";
+import { initializeDatabase, pool, queryDB } from "@config/database";
+import { stripe } from "@config/stripe";
+import { shopifyConfig } from "@config/shopify";
+import { registerWebhookRoutes } from "@routes/webhooks";
+import { createQrGenerator } from "@utils/qr-generator";
+import { createCardGenerator } from "@utils/card-generator";
+import { verifyPasscode } from "@middleware/auth";
+import employeeRoutes, { employeePublicRoutes } from "@routes/employees";
+import membershipRoutes from "@routes/memberships";
+import giftcardRoutes from "@routes/giftcards";
+import kdsRoutes from "@routes/kds";
+import orderRoutes from "@routes/orders";
+import customerRoutes from "@routes/customers";
+import shopifyRoutes from "@routes/shopify";
+import transactionRoutes from "@routes/transactions";
+import posRoutes from "@routes/pos";
+
+const shopifyToken = shopifyConfig.accessToken;
+const SEAL_TOKEN = env.seal.token;
+
+// Dynamically require `canvas` only when not in Electron
+let createCanvas, loadImage;
+
+if (!process.versions.electron) {
+  ({ createCanvas, loadImage } = require("canvas"));
+}
+
+const app = express();
+
+initializeDatabase();
+
+registerWebhookRoutes(app, {
+  enableShopifyOrderRoutes: !isElectron(),
+});
+
+if (!isElectron()) {
+  const qrGenerator = createQrGenerator();
+  const resolveAssetPath = (relativePath: string) =>
+    path.resolve(
+      __dirname,
+      isProduction()
+        ? `../public/${relativePath}`
+        : `./public/${relativePath}`
+    );
+
+  const cardGenerator =
+    createCanvas && loadImage
+      ? createCardGenerator({
+          createCanvas,
+          loadImage,
+          resolveAssetPath,
+          generateQrCodeBuffer: (data, options) =>
+            qrGenerator.generate(data, options),
+        })
+      : null;
+
+  app.get("/qr/:data.jpg", async (req, res) => {
+    const data = req.params.data;
+
+    try {
+      const imageBuffer = await qrGenerator.generate(data);
+      res.setHeader("Content-Type", "image/jpg");
+      res.setHeader("Content-Disposition", `inline; filename="${data}.jpg"`);
+      res.end(imageBuffer);
+    } catch (error) {
+      console.error("Error generating QR code:", error);
+      res.status(500).send("Error generating QR code");
+    }
+  });
+
+  app.get("/card/:cardType/:data/:type.png", async (req, res) => {
+    if (!cardGenerator) {
+      console.error(
+        "Card generator unavailable: canvas dependencies missing."
+      );
+      return res.status(500).send("Error generating ticket image");
+    }
+
+    const cardType = decodeURIComponent(req.params.cardType);
+    const data = decodeURIComponent(req.params.data);
+    const type = decodeURIComponent(req.params.type).replace(/\+/g, " ");
+
+    try {
+      const buffer = await cardGenerator.generate({
+        cardType,
+        data,
+        type,
+      });
+      res.setHeader("Content-Type", "image/png");
+      res.end(buffer);
+    } catch (error) {
+      console.error("Error generating ticket image:", error);
+      res.status(500).send("Error generating ticket image");
+    }
+  });
+}
+
+app.use(express.static(path.join(__dirname, "client/build")));
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+// Moved to src/middleware/auth.ts
+app.post("/api/validate-device", async (req, res) => {
+  const { deviceId } = req.body;
+  const result = await queryDB(
+    "SELECT device_id FROM approved_devices WHERE device_id = $1",
+    [deviceId]
+  );
+
+  res.json({ approved: result.rows.length > 0 });
+});
+
+// Moved to src/middleware/auth.ts - using imported verifyPasscode
+app.post("/api/verify-passcode", verifyPasscode);
+
+// Employee public routes - no JWT required (before the JWT middleware)
+// Employee login endpoint must come before the JWT middleware so employees can log in
+app.use("/api", employeePublicRoutes);
+
+//check token - JWT middleware for all other /api/ routes
+app.use("/api/", (req, res, next) => {
+  // Get the token from the header
+  const token = req.headers.authorization?.split(" ")[1]; // Assuming the header format is: "Authorization: Bearer YOUR_TOKEN"
+  if (!token) {
+    return res.status(403).send({ error: "No token provided." });
+  }
+
+  // Verify the token
+  jwt.verify(token, process.env.JWT_SECRET || "default-jwt-secret", (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ error: "Failed to authenticate token." });
+    }
+    // If successful, proceed to the next middleware
+    //req.decoded = decoded;  // Optional: Save the decoded info for use in other routes
+    next();
+  });
+});
+
+// Employee protected routes - JWT required
+// MOVED: Recurring Entries, Employee, and Clock Entry routes to src/routes/employees.ts
+app.use("/api", employeeRoutes);
+app.use("/api", membershipRoutes);
+app.use("/api", giftcardRoutes);
+app.use("/api", kdsRoutes);
+app.use("/api", orderRoutes);
+app.use("/api", customerRoutes);
+app.use("/api", shopifyRoutes);
+app.use("/api", transactionRoutes);
+app.use("/api", posRoutes);
+
+// OLD IMPLEMENTATION REMOVED - Recurring Entries Endpoints
+
+// OLD IMPLEMENTATION REMOVED - Transaction/POS Endpoints
+// MOVED: All transaction routes to src/routes/transactions.ts
+// MOVED: All POS routes to src/routes/pos.ts
+
+app.post("/create-portal-redirect/:customerId", async (req, res) => {
+  const { emails, startDate, endDate } = req.body; // Expecting an array of emails
+
+  if (!Array.isArray(emails) || emails.length === 0) {
+    return res.status(400).send("Emails must be a non-empty array.");
+  }
+
+  // Build query string for emails and date range
+  let emailQuery = emails.map((email) => `email:${email}`).join(" OR ");
+  let query = `(${emailQuery})`; // Group email conditions
+
+  if (startDate) {
+    query += ` created_at:>=${startDate}`;
+  }
+  if (endDate) {
+    query += ` created_at:<=${endDate}`;
+  }
+
+  // GraphQL query now includes pagination via "after" and pageInfo
+  const graphqlQuery = `
+    query GetTransactions($query: String!, $after: String) {
+      orders(first: 50, query: $query, after: $after) {
+        edges {
+          cursor
+          node {
+            id
+            email
+            createdAt
+            transactions(first: 10) {
+              amountSet {
+                presentmentMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              gateway
+              status
+              kind
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+        }
+      }
+    }
+  `;
+
+  try {
+    let allTransactions = [];
+    let after = null;
+    let hasNextPage = true;
+
+    // Loop to fetch all pages of orders
+    while (hasNextPage) {
+      const response = await fetch(
+        "https://zdts-amusement-park.myshopify.com/admin/api/graphql.json",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": shopifyToken,
+          },
+          body: JSON.stringify({
+            query: graphqlQuery,
+            variables: { query, after },
+          }),
+        }
+      );
+
+      const data = await response.json();
+      if (data.errors) {
+        console.error("GraphQL Errors:", data.errors);
+        return res.status(400).json({ errors: data.errors });
+      }
+
+      const ordersData = data?.data?.orders;
+      const orders = ordersData?.edges || [];
+
+      // Extract transactions for the current page
+      const transactions = orders.flatMap((edge) =>
+        edge.node.transactions.map((transaction) => ({
+          ...transaction,
+          orderId: edge.node.id,
+          email: edge.node.email,
+          createdAt: edge.node.createdAt, // Order creation date
+        }))
+      );
+
+      allTransactions = allTransactions.concat(transactions);
+
+      // Check if there is another page and update the cursor for pagination
+      hasNextPage = ordersData?.pageInfo?.hasNextPage;
+      if (hasNextPage && orders.length > 0) {
+        after = orders[orders.length - 1].cursor;
+      }
+    }
+
+    res.json(allTransactions);
+  } catch (error) {
+    console.error("Error fetching transactions:", error);
+    res.status(500).send("Error fetching transactions");
+  }
+});
+
+app.get("/api/transactions/unsettled", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM transactions
+      WHERE settled_on IS NULL AND (kind = 'capture' OR kind = 'sale' OR kind = 'refund' OR kind = 'change');
+    `;
+    const { rows } = await queryDB(query);
+    const processedRows = rows.map((row) => ({
+      ...row,
+      amount:
+        row.kind === "refund" || row.kind === "change"
+          ? -Math.abs(row.amount)
+          : row.amount,
+    }));
+    res.json(processedRows);
+  } catch (error) {
+    console.error("Error fetching unsettled transactions:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get("/api/items/unsettled", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM line_item_sales
+      WHERE settled_on IS NULL;
+    `;
+    const { rows } = await queryDB(query);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error fetching unsettled items:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.post("/api/transactions/settle", async (req, res) => {
+  try {
+    const { transactionIds } = req.body; // Expecting an array of transaction IDs
+    if (!transactionIds || !transactionIds.length) {
+      return res.status(200).send("No transaction IDs provided");
+    }
+
+    const now = new Date();
+    const query = `
+      UPDATE transactions
+      SET settled_on = $1
+      WHERE id = ANY($2::bigint[])
+      RETURNING *;
+    `;
+    const { rows } = await queryDB(query, [now, transactionIds]);
+    res.json(rows);
+  } catch (error) {
+    console.error("Error updating settlement date:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.post("/api/items/settle", async (req, res) => {
+  try {
+    const { itemIds } = req.body; // Expecting an array of transaction IDs
+    if (!itemIds || !itemIds.length) {
+      return res.status(200).send("No item IDs provided");
+    }
+
+    const now = new Date();
+    const query = `
+      UPDATE line_item_sales
+      SET settled_on = $1
+      WHERE id = ANY($2::bigint[])
+      RETURNING *;
+    `;
+    const { rows } = await queryDB(query, [now, itemIds]);
+    res.json(rows);
+  } catch (error) {
+    console.error("Error updating settlement date:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get("/api/get-plu-items", async (req: Request, res: Response) => {
+  try {
+    const groupNumber = req.query.group;
+    let query = "SELECT * FROM plu_list";
+    if (groupNumber) {
+      query += ` WHERE "group_" = ${groupNumber}`;
+    }
+    query += " LIMIT 25";
+    const result = await queryDB(query);
+    console.log(result);
+    const pluItems = result.rows.map((row) => {
+      // Keep all original columns from the database
+      const item = { ...row };
+      // Add/override specific values that need to be explicit
+      item.quantity = 1;
+      item.price = row.original_unit_price;
+      item.id = row.id;
+      return item;
+    });
+    console.log(pluItems);
+    res.json(pluItems);
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while fetching products" });
+  }
+});
+
+// Endpoint to modify a PLU item
+app.put("/api/modify-plu-item", async (req: Request, res: Response) => {
+  try {
+    // Destructure the id and the rest of the fields to update from the request body
+    const { id, ...fieldsToUpdate } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing PLU item ID" });
+    }
+    // Build the UPDATE query dynamically based on provided fields
+    let query = "UPDATE plu_list SET ";
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let index = 1;
+
+    // Loop through the fields and add them as parameterized clauses
+    for (const key in fieldsToUpdate) {
+      // Only update if the field exists in the request body
+      setClauses.push(`"${key}" = $${index}`);
+      values.push(fieldsToUpdate[key]);
+      index++;
+    }
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: "No fields provided to update" });
+    }
+    query += setClauses.join(", ");
+    // Add a WHERE clause to target the specific PLU item by its id
+    query += ` WHERE id = $${index} RETURNING *`;
+    values.push(id);
+
+    // Execute the query (assuming queryDB is your helper for executing parameterized queries)
+    const result = await queryDB(query, values);
+    if (result.rows.length > 0) {
+      res.json(result.rows[0]);
+    } else {
+      res.status(404).json({ error: "PLU item not found" });
+    }
+  } catch (error) {
+    console.error("Error modifying PLU item:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while modifying the PLU item" });
+  }
+});
+
+//update plu item color by id
+app.put(
+  "/api/update-plu-item-color/:id",
+  async (req: Request, res: Response) => {
+    const { id, color } = req.body;
+    try {
+      const result = await queryDB(
+        "UPDATE plu_list SET color = $1 WHERE id = $2",
+        [color, id]
+      );
+      res.json(result);
+    } catch (error) {
+      console.error("Error updating plu item color:", error);
+      res.status(500).send("Server error");
+    }
+  }
+);
+
+app.get("/api/get-pos-by-tab/:tab?", async (req: Request, res: Response) => {
+  const { tab } = req.params;
+  //const folderPath = path.join(__dirname, 'posTabs'); // Use an absolute path for the folder
+
+  // Ensure the folder exists
+  /*if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }*/
+
+  try {
+    const query = `
+      SELECT pos_tabs.*, plu_list.*
+      FROM pos_tabs
+      LEFT JOIN plu_list ON pos_tabs.plu_id = plu_list.id
+      ${tab ? `WHERE pos_tabs.tab_id = $1` : ``}
+      ORDER BY pos_tabs.position ASC
+    `;
+    const result = await queryDB(query, tab ? [tab] : []);
+    const posTabs = result.rows.map((row) => {
+      // Keep all original columns from both tables
+      const item = { ...row };
+      // Add/override specific values that need to be explicit or renamed
+      return {
+        ...item,
+        sku: String(row.id),
+        price: row.original_unit_price,
+        quantity: 1,
+        modClass: row.mod_class || 0,
+        numOfMods: row.num_of_mods_req || 0,
+        group: row.group_ || 0,
+        vendor: row.category || "admission",
+        fullPrice: row.original_unit_price || 0,
+        discountType: row.discount_type,
+        addPrice: row.add_price,
+        id: row.line_item_id,
+      };
+    });
+
+    // Save successful results to a local JSON file
+    //const jsonResult = JSON.stringify(posTabs);
+    //const fileName = tab ? `posTabs_${tab}.json` : 'posTabs_default.json';
+    //const filePath = path.join(folderPath, fileName);
+    //fs.writeFileSync(filePath, jsonResult);
+
+    res.json(posTabs);
+  } catch (error) {
+    console.error("Error fetching POS tabs:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while fetching POS tabs" });
+    /*
+    // If local JSON file exists, return the last known successful results
+    const fileName = tab ? `posTabs_${tab}.json` : 'posTabs_default.json';
+    const filePath = path.join(folderPath, fileName);
+    if (fs.existsSync(filePath)) {
+      const jsonFile = fs.readFileSync(filePath, 'utf8');
+      const lastKnownResults = JSON.parse(jsonFile);
+      res.json(lastKnownResults);
+    } else {
+      res.status(500).json({ error: 'An error occurred while fetching POS tabs' });
+    }
+    */
+  }
+});
+
+app.post("/api/create-barcode", async (req: Request, res: Response) => {
+  console.log("creating barcode:", req.body);
+  try {
+    const { barcode, plu_id } = req.body;
+
+    if (!barcode || !plu_id) {
+      return res.status(400).send("Barcode and PLU ID are required.");
+    }
+
+    const query = `
+          INSERT INTO barcodes (barcode, plu_id)
+          VALUES ($1, $2)
+          RETURNING *;
+      `;
+    const values = [barcode, plu_id];
+
+    const result = await queryDB(query, values);
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error creating barcode:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+app.get(
+  "/api/search-by-barcode/:barcode",
+  async (req: Request, res: Response) => {
+    const { barcode } = req.params;
+
+    if (!barcode) {
+      return res.status(400).send("Barcode is required.");
+    }
+
+    try {
+      //console.log(`[DB] Attempting to search barcode: ${barcode}`);
+      const query = `
+          SELECT b.barcode, p.*
+          FROM barcodes b
+          JOIN plu_list p ON b.plu_id = p.id
+          WHERE b.barcode = $1;
+      `;
+      const values = [barcode];
+
+      //console.log(`[DB] Executing query with values:`, values);
+      const result = await queryDB(query, values);
+      //console.log(`[DB] Query result rows:`, result?.rows?.length || 0);
+
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        // Keep all original columns from both tables
+        const item = { ...row };
+        // Add/override specific values that need to be explicit or renamed
+        return res.json({
+          ...item,
+          sku: String(row.id),
+          price: row.original_unit_price || 0,
+          quantity: 1,
+          modClass: row.mod_class || 0,
+          numOfMods: row.num_of_mods_req || 0,
+          group: row.group_ || 0,
+          fullPrice: row.original_unit_price || 0,
+          discountType: row.discount_type || null,
+          addPrice: row.add_price || 0,
+          id: row.line_item_id || null,
+        });
+      } else {
+        //(`[DB] No results found for barcode: ${barcode}`);
+        res.status(204).json();
+      }
+    } catch (error) {
+      console.error("[DB] Database error details:", {
+        message: error.message,
+        code: error.code,
+        stack: error.stack,
+      });
+      res.status(500).json({
+        error: "An error occurred while searching",
+        details: error.message,
+        code: error.code,
+      });
+    }
+  }
+)
+
+// OLD IMPLEMENTATION REMOVED - Gift Card Endpoints
+// MOVED: All gift card routes to src/routes/giftcards.ts
+
+// OLD IMPLEMENTATION REMOVED - Shopify/Product Endpoints
+// MOVED: All Shopify routes to src/routes/shopify.ts
+
+app.get(
+  "/api/get-pos-mods/:modclasses",
+  async (req: Request, res: Response) => {
+    const { modclasses } = req.params as { modclasses: string };
+
+    try {
+      const modclassArray = modclasses
+        .split(",")
+        .map((cls) => parseInt(cls.trim(), 10))
+        .filter((cls) => !isNaN(cls));
+
+      const rangeQueries = modclassArray
+        .map(
+          (modclass, i) => `
+        SELECT *
+        FROM plu_list
+        WHERE mod_class BETWEEN $${i * 2 + 1} AND $${i * 2 + 2}
+      `
+        )
+        .join(" UNION ALL ");
+
+      const params = modclassArray.flatMap((modclass) => [
+        modclass * 1000,
+        (modclass + 1) * 1000 - 1,
+      ]);
+
+      const result = await queryDB(rangeQueries, params);
+
+      const groupedMods: Record<number, any[]> = {};
+
+      for (const row of result.rows) {
+        const group = Math.floor(row.mod_class / 1000); // <-- This is key
+
+        const item = {
+          ...row,
+          price: row.original_unit_price || 0,
+          numOfMods: row.num_of_mods_req || 0,
+          modClass: row.mod_class || 0,
+          discountType: row.discount_type || null,
+          isMod: true,
+          addPrice: row.add_price || 0,
+          sku: row.id || null,
+          id: row.line_item_id || null,
+        };
+
+        if (!groupedMods[group]) groupedMods[group] = [];
+        groupedMods[group].push(item);
+      }
+
+      Object.values(groupedMods).forEach((mods: any[]) =>
+        mods.sort((a, b) => a.title.localeCompare(b.title))
+      );
+
+      res.json(groupedMods);
+    } catch (error) {
+      console.error("Error fetching pos mods:", error);
+      res
+        .status(500)
+        .json({ error: "An error occurred while fetching pos mods" });
+    }
+  }
+);
+
+app.get("/api/get-mods", async (req, res) => {
+  try {
+    // Get the modClasses from the query string and split it into an array
+    const modClasses = req.query.modClasses as string;
+    if (!modClasses) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or missing modClasses parameter" });
+    }
+
+    // Convert the comma-separated string to an array of integers
+    const modClassIntegers = modClasses.split(",").map(Number);
+    //console.log(modClassIntegers); // For debugging purposes
+
+    // Construct the SQL query
+    const query = `
+      SELECT *
+      FROM plu_list
+      WHERE mod = ANY($1::int[])
+    `;
+
+    // Execute the query
+    const result = await queryDB(query, [modClassIntegers]);
+    const posTabs = result.rows.map((row) => {
+      // Keep all original columns from the database
+      const item = { ...row };
+      // Add/override specific values that need to be explicit or renamed
+      return {
+        ...item,
+        title: row.title || "",
+        price: row.original_unit_price || 0,
+        numOfMods: row.num_of_mods_req || 0,
+        mod: row.mod || null,
+        discountType: row.discount_type || null,
+        isMod: true,
+        addPrice: row.add_price || 0,
+        mod_type: row.mod_type || null,
+        id: row.line_item_id || null,
+        variant_id: row.variant_id || null,
+        function: row.function || null,
+        max_quantity: row.max_quantity || null,
+        max_modClass: row.max_modClass || null,
+        mod_class: row.mod_class || null,
+        color: row.color || null,
+      };
+    });
+
+    res.json(posTabs);
+  } catch (error) {
+    console.error("Error fetching mods:", error);
+    res.status(500).json({ error: "An error occurred while fetching mods" });
+  }
+});
+
+
+app.post("/create-portal-redirect/:customerId", async (req, res) => {
+  try {
+    const customerId = req.params.customerId;
+    console.log("trying for a portal...", customerId);
+    /*
+    // Get the customer's subscription
+    //const subscription = await stripe.subscriptions.retrieve(customerId);
+
+    // Calculate the difference between the subscription start date and the current date
+    const startDate = new Date(subscription.start_date * 1000);
+    const currentDate = new Date();
+    const timeDifference = Math.abs(currentDate.getTime() - startDate.getTime());
+    const daysDifference = Math.ceil(timeDifference / (1000 * 3600 * 24));
+
+    let cancelUrl;
+    if (daysDifference < 365) {
+      // If the subscription has not been active for a year, do not allow cancellation
+      cancelUrl = '';
+    } else {
+      // If the subscription has been active for at least a year, check for unpaid invoices
+      const invoices = await stripe.invoices.list({ customer: customerId, status: 'unpaid' });
+      for (const invoice of invoices.data) {
+        const invoiceDate = new Date(invoice.date * 1000);
+        if (invoiceDate < startDate) {
+          // If there is an unpaid invoice with a date before the one-year mark, do not allow cancellation
+          cancelUrl = '';
+          break;
+        }
+      }
+    }
+
+    if (!cancelUrl) {
+      // If cancellation is not allowed, set the cancel URL to an empty string
+      cancelUrl = '';
+    } else {
+      // If cancellation is allowed, set the cancel URL to the provided redirect URL
+      cancelUrl = redirectUrl;
+    }
+
+    // Update the customer's subscription portal settings
+    const customer = await stripe.customers.update(customerId, {
+      subscription_portal: {
+        return_url: redirectUrl,
+        cancel_url: cancelUrl
+      }
+    });
+*/
+    console.log(customerId);
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: "https://www.zdtamusement.com/account",
+    });
+
+    res.redirect(session.url);
+  } catch (error) {
+    res.send({ success: false, error });
+  }
+});
+
+app.post("/create-payment-intent", async (req, res) => {
+  const { amount, email, name, phone, address } = req.body;
+  // Alternatively, set up a webhook to listen for the payment_intent.succeeded event
+  // and attach the PaymentMethod to a new Customer
+  const customer = await stripe.customers.create({
+    email: email,
+    name: name,
+    phone: phone,
+  });
+  // Create a PaymentIntent with the order amount and currency
+  const paymentIntent = await stripe.paymentIntents.create({
+    customer: customer.id,
+    setup_future_usage: "off_session",
+    amount: amount,
+    currency: "usd",
+  });
+
+  res.send({
+    clientSecret: paymentIntent.client_secret,
+  });
+});
+
+app.post("/api/tender-transactions", (req, res) => {
+  const term = `processed_at:>${req.body.startDate}T00:00:00-0500 AND processed_at:<${req.body.endDate}T00:00:00-0500`;
+  let vbs;
+  if (req.body.cursor) {
+    vbs = { query: term, num: req.body.num, cursor: req.body.cursor };
+  } else {
+    vbs = { query: term, num: req.body.num };
+  }
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `query($query:String!,$num:Int!${
+          req.body.cursor ? `,$cursor:String!` : ``
+        }){
+        tenderTransactions(reverse:true,query:$query, first:$num ${
+          req.body.cursor ? `after:$cursor` : ``
+        }) {
+          edges {
+            cursor
+            node {
+              id
+              processedAt
+              amount{
+                  amount
+              }
+              order {
+                tags
+                taxExempt
+                customer {
+                  displayName
+                  email
+                  taxExempt
+                  defaultAddress {
+                    company
+                    formatted
+                  }
+                }
+                return_items: metafield(namespace: "zdtpos", key: "return_items") {
+                  key
+                  value
+                }
+                refund_transactions: metafield(namespace: "zdtpos", key: "refund_transactions") {
+                  key
+                  value
+                }
+                taxLines {
+                  priceSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                }
+                refunds(first:30){
+                  transactions(first:30){
+                    edges{
+                      node{
+                        amountSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                    }
+                  }
+                  refundLineItems(first:30){
+                    edges{
+                      node{
+                        id
+                        lineItem {
+                          title
+                          id
+                          vendor
+                          taxable
+                        }
+                        quantity
+                        priceSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                  }
+                  }
+                }
+                transactions(first:200){
+                  amountSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                  fees {
+                    amount{
+                      amount
+                    }
+                  }
+                  formattedGateway
+                  kind
+                }
+                lineItems(first:30){
+                  edges{
+                    node{
+                      title
+                      taxable
+                      id
+                      variantTitle
+                      discountedUnitPriceSet{
+                        shopMoney{
+                          amount
+                        }
+                      }
+                      quantity
+                      refundableQuantity
+                      vendor
+                    }
+                  }
+                }
+              }
+
+            }
+          }
+          pageInfo{
+            hasNextPage
+          }
+        }
+    }      
+    `,
+        variables: vbs,
+      }),
+    }
+  )
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.get("/api/tender-transactions", (req, res) => {
+  const { startDate, endDate, cursor, num } = req.query;
+  
+  const term = `processed_at:>${startDate}T00:00:00-0500 AND processed_at:<${endDate}T00:00:00-0500`;
+  
+  let vbs;
+  if (cursor) {
+    vbs = { query: term, num: parseInt(num as string), cursor };
+  } else {
+    vbs = { query: term, num: parseInt(num as string) };
+  }
+
+  fetch(
+    "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": shopifyToken,
+      },
+      body: JSON.stringify({
+        query: `query($query:String!,$num:Int!${
+          cursor ? `,$cursor:String!` : ``
+        }){
+        tenderTransactions(query:$query, first:$num ${
+          cursor ? `after:$cursor` : ``
+        }) {
+          edges {
+            cursor
+            node {
+              id
+              processedAt
+              amount{
+                  amount
+              }
+              order {
+                tags
+                taxExempt
+                customer {
+                  displayName
+                  email
+                  taxExempt
+                  defaultAddress {
+                    company
+                    formatted
+                  }
+                }
+                return_items: metafield(namespace: "zdtpos", key: "return_items") {
+                  key
+                  value
+                }
+                refund_transactions: metafield(namespace: "zdtpos", key: "refund_transactions") {
+                  key
+                  value
+                }
+                taxLines {
+                  priceSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                }
+                refunds(first:30){
+                  transactions(first:30){
+                    edges{
+                      node{
+                        amountSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                    }
+                  }
+                  refundLineItems(first:30){
+                    edges{
+                      node{
+                        id
+                        lineItem {
+                          title
+                          id
+                          vendor
+                          taxable
+                        }
+                        quantity
+                        priceSet{
+                          shopMoney{
+                            amount
+                          }
+                        }
+                      }
+                  }
+                  }
+                }
+                transactions(first:200){
+                  amountSet{
+                    shopMoney{
+                      amount
+                    }
+                  }
+                  fees {
+                    amount{
+                      amount
+                    }
+                  }
+                  formattedGateway
+                  kind
+                }
+                lineItems(first:30){
+                  edges{
+                    node{
+                      title
+                      taxable
+                      id
+                      variantTitle
+                      discountedUnitPriceSet{
+                        shopMoney{
+                          amount
+                        }
+                      }
+                      quantity
+                      refundableQuantity
+                      vendor
+                    }
+                  }
+                }
+              }
+
+            }
+          }
+          pageInfo{
+            hasNextPage
+          }
+        }
+    }      
+    `,
+        variables: vbs,
+      }),
+    }
+  )
+    .then((result) => {
+      return result.json();
+    })
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+app.post("/api/tender-count", (req, res) => {
+  interface VbsType {
+    query: string;
+    num: any;
+    cursor?: string; // The '?' indicates that cursor is optional
+  }
+
+  const performFetch = (vbs: VbsType, retries = 3) => {
+    return fetch(
+      "https://zdts-amusement-park.myshopify.com/admin/api/unstable/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": shopifyToken,
+        },
+        body: JSON.stringify({
+          query: `query($query:String!,$num:Int!${
+            req.body.cursor ? `,$cursor:String!` : ``
+          }){
+          tenderTransactions(reverse:true,query:$query, first:$num ${
+            req.body.cursor ? `after:$cursor` : ``
+          }) {
+            edges {
+              node {
+                id
+                processedAt
+                amount{
+                  amount
+                }
+                order {
+                  id
+                }
+              }
+              cursor
+            }
+            pageInfo{
+              hasNextPage
+            }
+          }
+      }`,
+          variables: vbs,
+        }),
+      }
+    )
+      .then((result) => {
+        console.log("HTTP Status Code:", result.status);
+        return result.json();
+      })
+      .then((data) => {
+        if (
+          data.errors &&
+          data.errors.some((e) => e.extensions.code === "THROTTLED") &&
+          retries > 0
+        ) {
+          const requestedQueryCost = data.extensions.cost.requestedQueryCost;
+          const currentlyAvailable =
+            data.extensions.cost.throttleStatus.currentlyAvailable;
+          const restoreRate = data.extensions.cost.throttleStatus.restoreRate;
+          const waitTime =
+            Math.ceil((requestedQueryCost - currentlyAvailable) / restoreRate) *
+            1000;
+
+          console.log(`Throttled! Retrying in ${waitTime}ms...`);
+          return new Promise((resolve) =>
+            setTimeout(() => resolve(performFetch(vbs, retries - 1)), waitTime)
+          );
+        }
+        return data;
+      });
+  };
+
+  const term = `processed_at:>${req.body.startDate}T00:00:00-0500 AND processed_at:<${req.body.endDate}T00:00:00-0500`;
+  const vbs: VbsType = { query: term, num: req.body.num };
+
+  if (req.body.cursor) {
+    vbs.cursor = req.body.cursor;
+  }
+
+  performFetch(vbs)
+    .then((data) => {
+      res.send(data);
+    })
+    .catch((error) => console.log(error.message));
+});
+
+// OLD IMPLEMENTATION REMOVED - KDS Routes
+// MOVED: All KDS routes to src/routes/kds.ts
+
+// Shared function to setup PostgreSQL notifications
+async function setupPostgresNotifications(io: SocketIOServer) {
+  try {
+    const notificationClient: PoolClient = await pool.connect();
+    // Do not release this client so it remains dedicated for notifications
+
+    // Setup KDS order update listener
+    try {
+      await notificationClient.query("LISTEN kds_order_update");
+      console.log("Now listening for kds_order_update notifications.");
+    } catch (err) {
+      console.error("Error executing LISTEN kds_order_update query:", err);
+    }
+
+    // Setup transaction update listener
+    try {
+      await notificationClient.query("LISTEN transaction_update");
+      console.log("Now listening for transaction_update notifications.");
+    } catch (err) {
+      console.error("Error executing LISTEN transaction_update query:", err);
+    }
+
+    // Handle notifications
+    notificationClient.on("notification", (msg) => {
+      // Route notifications based on channel
+      if (msg.channel === "kds_order_update") {
+        io.emit("kds_update", "kds needs to update");
+      } else if (msg.channel === "transaction_update") {
+        io.emit("transaction_update", msg.payload || "transaction updated");
+      }
+    });
+
+    notificationClient.on("error", (err) => {
+      console.error("Notification client error:", err);
+    });
+  } catch (err) {
+    console.error("Error obtaining a notification client from the pool:", err);
+  }
+}
+
+// Server setup based on environment
+let server: any;
+let io: SocketIOServer;
+
+if (isProduction()) {
+  app.enable("trust proxy"); // trust Heroku's proxy
+
+  app.use((req, res, next) => {
+    if (req.protocol !== "https") {
+      return res.redirect("https://" + req.headers.host + req.url);
+    }
+    next();
+  });
+
+  // Serve static files from the React app's build folder
+  app.use(express.static(path.join(__dirname, "..", "client", "build")));
+
+  // Send all other requests to the React app's index.html file
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(__dirname, "..", "client", "build", "index.html"));
+  });
+
+  server = http.createServer(app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  const productionPort = env.port === 3001 ? 8080 : env.port;
+
+  server.listen(productionPort, () => {
+    console.log(`Production server running on port ${productionPort}`);
+  });
+
+  setupPostgresNotifications(io);
+
+} else if (isElectron()) {
+  // Electron environment: Use self-signed certificates
+  app.use(express.static(path.join(__dirname, "..", "client", "build")));
+  console.log("device");
+
+  const keyPath = path.join(__dirname, "..", "key.pem");
+  const certPath = path.join(__dirname, "..", "cert.pem");
+
+  const httpsOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+
+  server = https.createServer(httpsOptions, app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  console.log("electron port: ", process.env.ELECTRON_PORT);
+
+  server.listen(process.env.ELECTRON_PORT || 8901, () => {
+    console.log(
+      `Electron (local) server running with SSL on port ${
+        process.env.ELECTRON_PORT || 8901
+      }`
+    );
+  });
+
+  setupPostgresNotifications(io);
+
+} else {
+  console.log("running in dev mode");
+  // Development mode: Use ts-node to run TypeScript files directly
+  app.get("*", (_req, res) => {
+    res.send("Development mode: no static files served.");
+  });
+
+  const keyPath = path.join(__dirname, "key.pem");
+  const certPath = path.join(__dirname, "cert.pem");
+
+  const httpsOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+
+  server = https.createServer(httpsOptions, app);
+  io = new SocketIOServer(server, {
+    cors: {
+      origin: "*", // Adjust as needed for your deployment
+    },
+  });
+
+  server.listen(8080, () => {
+    console.log("HTTPS server running in development mode on port 8080");
+  });
+
+  setupPostgresNotifications(io);
+}

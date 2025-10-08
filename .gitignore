@@ -1,0 +1,96 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+build/
+dist/
+*/build/
+*/dist/
+client/build/
+
+# Compiled files
+*.js
+!forge.config.js
+index.js
+test.js
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+test.env
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+build.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# Jest
+.jest-cache/
+jest-cache/
+
+# Test databases
+test-db/
+*.test.db
+*.test.sqlite
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Certificates & keys
+*.pem
+*.key
+*.crt
+*.csr
+*.conf
+key.pem
+keytmp.pem
+cert.pem
+localhost.key
+localhost.crt
+localhost.conf
+
+# Temporary files
+*.tmp
+*.temp
+
+# Google Drive service account
+membership-photos-*.json
+
+# Python cache (for photoimport script)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Heroku
+Procfile.local
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
